@@ -1,0 +1,713 @@
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <commctrl.h>
+#include <commdlg.h>
+#include <windowsx.h>
+#include <limits>
+#include <cstdlib>
+#include "Fantasy/World.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
+
+using namespace fantasy;
+namespace {
+constexpr wchar_t MainClass[]=L"FantasyChronicleMainWindow";
+constexpr wchar_t DetailClass[]=L"FantasyChronicleDetailWindow";
+constexpr COLORREF Background=RGB(19,27,37);
+constexpr COLORREF Bright=RGB(238,241,244);
+constexpr COLORREF Muted=RGB(163,179,192);
+enum ControlID {
+    ID_START=101, ID_COUNT=102, ID_YEARS=103, ID_SEED=104,
+    ID_PREVIOUS=110, ID_NEXT=111, ID_PLAY=112, ID_SLIDER=113, ID_EXPORT=114, ID_NEW=115,
+    ID_PEOPLE=201, ID_DEAD=202
+};
+
+std::wstring number(int value) { return std::to_wstring(value); }
+std::wstring yearLabel(int year) { return year<0?std::to_wstring(-year)+L" г. до начала летоисчисления":std::to_wstring(year)+L" г."; }
+COLORREF rgb(const Rgb& c) { return RGB(c.r,c.g,c.b); }
+Rgb terrainColor(Terrain t) {
+    switch(t) {
+        case Terrain::Sea: return {37,74,113};
+        case Terrain::Plain: return {181,174,121};
+        case Terrain::Forest: return {81,135,94};
+        case Terrain::Jungle: return {41,107,86};
+        case Terrain::Mountain: return {135,137,141};
+    }
+    return {0,0,0};
+}
+Rgb mix(const Rgb& a,const Rgb& b,int aPct) {
+    const int bPct=100-aPct;
+    return {static_cast<uint8_t>((int(a.r)*aPct+int(b.r)*bPct)/100),
+            static_cast<uint8_t>((int(a.g)*aPct+int(b.g)*bPct)/100),
+            static_cast<uint8_t>((int(a.b)*aPct+int(b.b)*bPct)/100)};
+}
+uint32_t dibPixel(Rgb c) { return (uint32_t(c.r)<<16)|(uint32_t(c.g)<<8)|c.b; }
+std::wstring overview(Species type) {
+    switch(type) {
+    case Species::Human: return L"Многорасовые города, деревни и замки. Античные традиции, торговля, экспансия; рабство считается допустимым.";
+    case Species::Elf: return L"Изолированные лесные поселения, осторожная дипломатия, защита природы и отрицание рабства.";
+    case Species::Dwarf: return L"Горные чертоги, шахты, кузни; изоляционизм сочетается с вооружёнными вылазками за пленниками.";
+    case Species::Outlaw: return L"Разрозненные шайки, пиратские стоянки, разбой и контрабандные картели; окрашенные области показывают зоны влияния.";
+    case Species::Folk: return L"Маленькие скрытые общины лесных и сказочных существ; избегают встреч с крупными державами.";
+    }
+    return L"";
+}
+void textLine(HDC dc,int x,int y,const std::wstring& str,COLORREF color=Bright) {
+    SetTextColor(dc,color);
+    TextOutW(dc,x,y,str.c_str(),static_cast<int>(str.size()));
+}
+std::string toUtf8(std::wstring_view value) {
+    if(value.empty()) return {};
+    int len=WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),nullptr,0,nullptr,nullptr);
+    if(len<=0) return {};
+    std::string result(static_cast<size_t>(len),'\0');
+    WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),result.data(),len,nullptr,nullptr);
+    return result;
+}
+bool writeUtf8(HANDLE file,const std::wstring& value) {
+    std::string text=toUtf8(value);
+    if(text.empty()) return true;
+    DWORD written=0;
+    return WriteFile(file,text.data(),static_cast<DWORD>(text.size()),&written,nullptr)!=0 && written==text.size();
+}
+}
+
+class Application {
+public:
+    explicit Application(HINSTANCE instance):instance_(instance) {}
+    ~Application() {
+        if(font_) DeleteObject(font_);
+        if(fontSmall_) DeleteObject(fontSmall_);
+        if(fontTitle_) DeleteObject(fontTitle_);
+        if(backgroundBrush_) DeleteObject(backgroundBrush_);
+    }
+    int run(int show);
+
+private:
+    HINSTANCE instance_{};
+    HWND main_{}, details_{};
+    HWND inputCount_{},inputYears_{},inputSeed_{},yearText_{},track_{},playButton_{};
+    HWND detailsTitle_{},detailsHistory_{},detailsPeople_{},detailsBio_{},detailsShowDead_{};
+    HFONT font_{},fontSmall_{},fontTitle_{};
+    HBRUSH backgroundBrush_{};
+    std::vector<HWND> setupControls_,runtimeControls_;
+    World world_;
+    bool started_{false},playing_{false};
+    int year_{0},selectedNation_{-1},selectedPerson_{-1};
+    std::wstring hint_=L"Нажмите на цветную область карты, чтобы открыть её летопись.";
+
+    static LRESULT CALLBACK mainProcedure(HWND,UINT,WPARAM,LPARAM);
+    static LRESULT CALLBACK detailProcedure(HWND,UINT,WPARAM,LPARAM);
+    LRESULT dispatchMain(HWND,UINT,WPARAM,LPARAM);
+    LRESULT dispatchDetails(HWND,UINT,WPARAM,LPARAM);
+    HWND createControl(HWND parent,const wchar_t* cls,const wchar_t* title,DWORD style,
+                       int id,int x,int y,int w,int h,DWORD ex=0,HFONT customFont=nullptr);
+    void onMainCreate();
+    void createSetupControls();
+    void createRuntimeControls();
+    void layoutMain();
+    RECT mapBounds() const;
+    void paintMain(HDC);
+    void paintSetup(HDC,const RECT&);
+    void paintWorld(HDC,const RECT&);
+    void paintLegend(HDC,const RECT&);
+    void startGeneration();
+    void showSetup();
+    int readInput(HWND control,int fallback) const;
+    void setYear(int year);
+    void togglePlay();
+    void clickMap(int x,int y);
+    void openDetails(int nation);
+    void layoutDetails();
+    void updateDetails();
+    void updateBiography();
+    void exportChronicle();
+};
+
+HWND Application::createControl(HWND parent,const wchar_t* cls,const wchar_t* title,DWORD style,
+                                int id,int x,int y,int w,int h,DWORD ex,HFONT customFont) {
+    HWND hwnd=CreateWindowExW(ex,cls,title,WS_CHILD|WS_VISIBLE|style,x,y,w,h,parent,
+                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance_,nullptr);
+    if(hwnd) SendMessageW(hwnd,WM_SETFONT,reinterpret_cast<WPARAM>(customFont?customFont:font_),TRUE);
+    return hwnd;
+}
+int Application::run(int show) {
+    INITCOMMONCONTROLSEX icc{};icc.dwSize=sizeof(icc);icc.dwICC=ICC_BAR_CLASSES;
+    InitCommonControlsEx(&icc);
+    backgroundBrush_=CreateSolidBrush(Background);
+    font_=CreateFontW(-19,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,
+                      CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe UI");
+    fontSmall_=CreateFontW(-15,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,
+                      CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe UI");
+    fontTitle_=CreateFontW(-31,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,
+                      CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe UI");
+    WNDCLASSEXW mainClass{sizeof(WNDCLASSEXW)};
+    mainClass.style=CS_HREDRAW|CS_VREDRAW;
+    mainClass.lpfnWndProc=mainProcedure;
+    mainClass.hInstance=instance_;
+    mainClass.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    mainClass.hIcon=LoadIconW(nullptr,IDI_APPLICATION);
+    mainClass.hbrBackground=backgroundBrush_;
+    mainClass.lpszClassName=MainClass;
+    RegisterClassExW(&mainClass);
+    WNDCLASSEXW detailClass=mainClass;
+    detailClass.lpfnWndProc=detailProcedure;
+    detailClass.lpszClassName=DetailClass;
+    RegisterClassExW(&detailClass);
+    main_=CreateWindowExW(0,MainClass,L"Фэнтези: летопись мира",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,
+                          CW_USEDEFAULT,CW_USEDEFAULT,1380,850,nullptr,nullptr,instance_,this);
+    if(!main_) return 1;
+    ShowWindow(main_,show);UpdateWindow(main_);
+    MSG message{};
+    while(GetMessageW(&message,nullptr,0,0)>0) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    return static_cast<int>(message.wParam);
+}
+LRESULT CALLBACK Application::mainProcedure(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
+    Application* app=reinterpret_cast<Application*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
+    if(msg==WM_NCCREATE) {
+        app=static_cast<Application*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);
+        SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app));
+        app->main_=hwnd;
+    }
+    return app?app->dispatchMain(hwnd,msg,w,l):DefWindowProcW(hwnd,msg,w,l);
+}
+LRESULT CALLBACK Application::detailProcedure(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
+    Application* app=reinterpret_cast<Application*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
+    if(msg==WM_NCCREATE) {
+        app=static_cast<Application*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);
+        SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app));
+        app->details_=hwnd;
+    }
+    return app?app->dispatchDetails(hwnd,msg,w,l):DefWindowProcW(hwnd,msg,w,l);
+}
+void Application::onMainCreate() { createSetupControls();layoutMain(); }
+void Application::createSetupControls() {
+    setupControls_.push_back(createControl(main_,L"STATIC",L"Число цивилизаций (1–28)",SS_LEFT,0,71,234,305,28));
+    inputCount_=createControl(main_,L"EDIT",L"10",WS_BORDER|ES_NUMBER|ES_AUTOHSCROLL,ID_COUNT,72,267,230,34,WS_EX_CLIENTEDGE);
+    setupControls_.push_back(inputCount_);
+    setupControls_.push_back(createControl(main_,L"STATIC",L"Продолжительность истории (1–400 лет)",SS_LEFT,0,71,324,385,28));
+    inputYears_=createControl(main_,L"EDIT",L"200",WS_BORDER|ES_NUMBER|ES_AUTOHSCROLL,ID_YEARS,72,357,230,34,WS_EX_CLIENTEDGE);
+    setupControls_.push_back(inputYears_);
+    setupControls_.push_back(createControl(main_,L"STATIC",L"Зерно генератора (для повторяемого мира)",SS_LEFT,0,71,414,400,28));
+    inputSeed_=createControl(main_,L"EDIT",L"42",WS_BORDER|ES_NUMBER|ES_AUTOHSCROLL,ID_SEED,72,447,230,34,WS_EX_CLIENTEDGE);
+    setupControls_.push_back(inputSeed_);
+    setupControls_.push_back(createControl(main_,L"BUTTON",L"Создать мир",BS_PUSHBUTTON|WS_TABSTOP,ID_START,72,519,235,45));
+}
+void Application::createRuntimeControls() {
+    runtimeControls_.push_back(createControl(main_,L"BUTTON",L"◀ Год",BS_PUSHBUTTON,ID_PREVIOUS,22,700,90,40));
+    runtimeControls_.push_back(createControl(main_,L"BUTTON",L"Год ▶",BS_PUSHBUTTON,ID_NEXT,120,700,90,40));
+    playButton_=createControl(main_,L"BUTTON",L"▶ Пуск",BS_PUSHBUTTON,ID_PLAY,220,700,114,40);
+    runtimeControls_.push_back(playButton_);
+    track_=createControl(main_,TRACKBAR_CLASSW,L"",TBS_HORZ|TBS_NOTICKS|WS_TABSTOP,ID_SLIDER,340,700,500,40);
+    runtimeControls_.push_back(track_);
+    yearText_=createControl(main_,L"STATIC",L"Год: 0",SS_CENTER,0,840,700,170,33);
+    runtimeControls_.push_back(yearText_);
+    runtimeControls_.push_back(createControl(main_,L"BUTTON",L"Летопись в TXT",BS_PUSHBUTTON,ID_EXPORT,1010,700,160,40));
+    runtimeControls_.push_back(createControl(main_,L"BUTTON",L"Новый мир",BS_PUSHBUTTON,ID_NEW,1175,700,140,40));
+    SendMessageW(track_,TBM_SETRANGEMIN,FALSE,0);
+    SendMessageW(track_,TBM_SETRANGEMAX,TRUE,world_.settings().years);
+    SendMessageW(track_,TBM_SETPOS,TRUE,0);
+    layoutMain();
+}
+int Application::readInput(HWND hwnd,int fallback) const {
+    wchar_t buffer[64]{};
+    GetWindowTextW(hwnd,buffer,64);
+    wchar_t* end=nullptr;
+    long result=wcstol(buffer,&end,10);
+    if(end==buffer || result<0 || result>1000000000) return fallback;
+    return static_cast<int>(result);
+}
+void Application::startGeneration() {
+    Settings s;
+    s.civilizations=std::clamp(readInput(inputCount_,10),1,28);
+    s.years=std::clamp(readInput(inputYears_,200),1,400);
+    s.seed=static_cast<uint32_t>(readInput(inputSeed_,42));
+    HCURSOR old=SetCursor(LoadCursorW(nullptr,IDC_WAIT));
+    EnableWindow(main_,FALSE);
+    world_.generate(s);
+    EnableWindow(main_,TRUE);SetCursor(old);
+    for(HWND control:setupControls_) ShowWindow(control,SW_HIDE);
+    if(runtimeControls_.empty()) createRuntimeControls();
+    else {
+        for(HWND control:runtimeControls_) ShowWindow(control,SW_SHOW);
+        SendMessageW(track_,TBM_SETRANGEMAX,TRUE,s.years);
+        SendMessageW(track_,TBM_SETPOS,TRUE,0);
+    }
+    started_=true;year_=0;selectedNation_=-1;selectedPerson_=-1;
+    SetWindowTextW(yearText_,L"Год: 0");
+    hint_=L"ЛКМ по государству — история. Ползунок — путешествие во времени.";
+    layoutMain();InvalidateRect(main_,nullptr,TRUE);
+}
+void Application::showSetup() {
+    if(playing_) togglePlay();
+    if(details_) DestroyWindow(details_);
+    for(HWND control:runtimeControls_) ShowWindow(control,SW_HIDE);
+    for(HWND control:setupControls_) ShowWindow(control,SW_SHOW);
+    started_=false;
+    InvalidateRect(main_,nullptr,TRUE);
+}
+RECT Application::mapBounds() const {
+    RECT bounds{}; GetClientRect(main_,&bounds);
+    int areaW=std::max(220,bounds.right-348),areaH=std::max(160,bounds.bottom-206);
+    double scale=std::min(double(areaW)/world_.settings().width,double(areaH)/world_.settings().height);
+    int w=std::max(1,static_cast<int>(world_.settings().width*scale));
+    int h=std::max(1,static_cast<int>(world_.settings().height*scale));
+    int top=88+(std::max(0,areaH-h))/2;
+    return RECT{24,top,24+w,top+h};
+}
+void Application::layoutMain() {
+    if(!main_) return;
+    RECT rc{};GetClientRect(main_,&rc);
+    if(!runtimeControls_.empty()) {
+        int bottom=std::max(480,rc.bottom-77);
+        int side=rc.right-15;
+        MoveWindow(runtimeControls_[0],24,bottom,81,36,TRUE);
+        MoveWindow(runtimeControls_[1],110,bottom,81,36,TRUE);
+        MoveWindow(playButton_,197,bottom,104,36,TRUE);
+        int exportX=std::max(560,side-314);
+        int yearX=std::max(450,exportX-132);
+        int sliderW=std::max(80,yearX-315);
+        MoveWindow(track_,307,bottom-1,sliderW,40,TRUE);
+        MoveWindow(yearText_,yearX,bottom+5,127,29,TRUE);
+        MoveWindow(runtimeControls_[5],exportX,bottom,157,36,TRUE);
+        MoveWindow(runtimeControls_[6],exportX+163,bottom,140,36,TRUE);
+    }
+    InvalidateRect(main_,nullptr,FALSE);
+}
+void Application::setYear(int year) {
+    if(!started_) return;
+    int value=std::clamp(year,0,world_.settings().years);
+    if(value==year_) return;
+    year_=value;
+    SendMessageW(track_,TBM_SETPOS,TRUE,year_);
+    SetWindowTextW(yearText_,(L"Год: "+number(year_)).c_str());
+    updateDetails();
+    InvalidateRect(main_,nullptr,FALSE);
+    if(year_==world_.settings().years && playing_) togglePlay();
+}
+void Application::togglePlay() {
+    playing_=!playing_;
+    if(playing_) {
+        if(year_==world_.settings().years) setYear(0);
+        SetTimer(main_,1,190,nullptr);
+        SetWindowTextW(playButton_,L"❚❚ Пауза");
+    } else {
+        KillTimer(main_,1);
+        SetWindowTextW(playButton_,L"▶ Пуск");
+    }
+}
+void Application::paintSetup(HDC dc,const RECT& bounds) {
+    SelectObject(dc,fontTitle_);
+    textLine(dc,70,73,L"ФЭНТЕЗИ · ЛЕТОПИСЬ МИРА");
+    SelectObject(dc,font_);
+    textLine(dc,71,138,L"Генерация географии, государств и истории каждого жителя",Muted);
+    textLine(dc,71,170,L"Выберите начальные условия, затем изучайте изменения мира по годам.",Muted);
+    int right=std::max(530,bounds.right/2+20);
+    SelectObject(dc,fontTitle_);
+    textLine(dc,right,234,L"Пять культур");
+    SelectObject(dc,font_);
+    const std::wstring descriptions[]={L"Люди — города, торговля, империи и республики",
+        L"Эльфы — рощи, монархии и оборона",
+        L"Дварфы — шахты, кланы и набеги",
+        L"Пираты — лагеря и криминальные союзы",
+        L"Сказочный народец — тайные лесные общины"};
+    for(int i=0;i<5;++i) textLine(dc,right,295+i*48,descriptions[i],Muted);
+    SelectObject(dc,fontSmall_);
+    textLine(dc,71,std::max(615,bounds.bottom-90),L"Модель хранит отдельные биографии и события. Численность населения намеренно ограничена для скорости симуляции.",Muted);
+}
+void Application::paintWorld(HDC dc,const RECT& bounds) {
+    const Snapshot& snap=world_.at(year_);
+    const int w=world_.settings().width,h=world_.settings().height;
+    std::vector<uint32_t> pixels(static_cast<size_t>(w*h));
+    for(int y=0;y<h;++y) for(int x=0;x<w;++x) {
+        const int idx=world_.index(x,y);
+        auto base=terrainColor(world_.tiles()[static_cast<size_t>(idx)].terrain);
+        const int owner=snap.owner[static_cast<size_t>(idx)];
+        if(owner>=0) base=mix(world_.nations()[static_cast<size_t>(owner)].color,base,72);
+        else if(world_.tiles()[static_cast<size_t>(idx)].terrain==Terrain::Sea) {
+            int shine=(x*5+y*11+world_.tiles()[static_cast<size_t>(idx)].height)%15;
+            base.b=static_cast<uint8_t>(std::min(220,int(base.b)+shine));
+        }
+        pixels[static_cast<size_t>(idx)]=dibPixel(base);
+    }
+    BITMAPINFO info{};
+    info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth=w;
+    info.bmiHeader.biHeight=-h;
+    info.bmiHeader.biPlanes=1;
+    info.bmiHeader.biBitCount=32;
+    info.bmiHeader.biCompression=BI_RGB;
+    SetStretchBltMode(dc,COLORONCOLOR);
+    StretchDIBits(dc,bounds.left,bounds.top,bounds.right-bounds.left,bounds.bottom-bounds.top,
+                  0,0,w,h,pixels.data(),&info,DIB_RGB_COLORS,SRCCOPY);
+    // Политические границы (включая береговую линию).
+    HPEN pen=CreatePen(PS_SOLID,2,RGB(24,34,40));
+    HGDIOBJ oldPen=SelectObject(dc,pen);
+    const double sx=double(bounds.right-bounds.left)/w,sy=double(bounds.bottom-bounds.top)/h;
+    for(int y=0;y<h;++y) for(int x=0;x<w;++x) {
+        int idx=world_.index(x,y),owner=snap.owner[static_cast<size_t>(idx)];
+        if(x+1<w && owner!=snap.owner[static_cast<size_t>(idx+1)]) {
+            int xx=bounds.left+int(std::lround((x+1)*sx));
+            int y0=bounds.top+int(std::lround(y*sy));
+            int y1=bounds.top+int(std::lround((y+1)*sy));
+            MoveToEx(dc,xx,y0,nullptr);LineTo(dc,xx,y1);
+        }
+        if(y+1<h && owner!=snap.owner[static_cast<size_t>(idx+w)]) {
+            int yy=bounds.top+int(std::lround((y+1)*sy));
+            int x0=bounds.left+int(std::lround(x*sx));
+            int x1=bounds.left+int(std::lround((x+1)*sx));
+            MoveToEx(dc,x0,yy,nullptr);LineTo(dc,x1,yy);
+        }
+    }
+    SelectObject(dc,oldPen);DeleteObject(pen);
+    // Поселения не абстрактны: каждая точка соответствует объекту модели.
+    HBRUSH white=CreateSolidBrush(RGB(245,233,193));
+    HGDIOBJ oldBrush=SelectObject(dc,white);
+    SelectObject(dc,GetStockObject(BLACK_PEN));
+    for(const Settlement& place:world_.settlements()) {
+        if(place.founded>year_) continue;
+        int idx=world_.index(place.position.x,place.position.y);
+        int owner=snap.owner[static_cast<size_t>(idx)];
+        if(owner<0) continue;
+        int x=bounds.left+int((place.position.x+.5)*sx),y=bounds.top+int((place.position.y+.5)*sy);
+        int r=(place.kind==SettlementKind::City||place.kind==SettlementKind::MountainCity)?5:3;
+        Ellipse(dc,x-r,y-r,x+r+1,y+r+1);
+    }
+    SelectObject(dc,oldBrush);DeleteObject(white);
+    // Подписи столиц.
+    SelectObject(dc,fontSmall_);
+    SetBkMode(dc,TRANSPARENT);
+    for(const Nation& nation:world_.nations()) {
+        if(nation.founded>year_ || (nation.vanished>=0 && year_>=nation.vanished)) continue;
+        if(snap.owner[static_cast<size_t>(world_.index(nation.capital.x,nation.capital.y))]!=nation.id) continue;
+        int x=bounds.left+int((nation.capital.x+.5)*sx)+7,y=bounds.top+int((nation.capital.y+.5)*sy)-8;
+        std::wstring title=nation.name;
+        if(title.size()>19) title=title.substr(0,18)+L"…";
+        textLine(dc,x+1,y+1,title,RGB(9,16,22));
+        textLine(dc,x,y,title,RGB(255,247,219));
+    }
+    SelectObject(dc,font_);
+    HPEN frame=CreatePen(PS_SOLID,1,RGB(109,137,154));
+    HGDIOBJ oldFrame=SelectObject(dc,frame);
+    HGDIOBJ emptyBrush=SelectObject(dc,GetStockObject(NULL_BRUSH));
+    Rectangle(dc,bounds.left-1,bounds.top-1,bounds.right+1,bounds.bottom+1);
+    SelectObject(dc,emptyBrush);SelectObject(dc,oldFrame);DeleteObject(frame);
+}
+void Application::paintLegend(HDC dc,const RECT& map) {
+    RECT window{};GetClientRect(main_,&window);
+    int left=window.right-305;
+    SelectObject(dc,fontTitle_);
+    textLine(dc,24,28,L"МИР · " + number(year_) + L" ГОД");
+    SelectObject(dc,fontSmall_);
+    textLine(dc,24,65,L"Цвет — область влияния; точки — поселения",Muted);
+    SelectObject(dc,font_);
+    textLine(dc,left,96,L"Государства");
+    const Snapshot& snap=world_.at(year_);
+    int count=0,visible=0;
+    const int maxVisible=std::max(5,(map.bottom-map.top-40)/35);
+    for(const Nation& n:world_.nations()) {
+        if(n.founded>year_ || n.id>=static_cast<int>(snap.nationStates.size()) || snap.nationStates[static_cast<size_t>(n.id)].territory<=0) continue;
+        ++count;
+        if(visible>=maxVisible) continue;
+        int y=135+visible*35;
+        HBRUSH swatch=CreateSolidBrush(rgb(n.color));
+        RECT swatchRect{left,y,left+13,y+18};FillRect(dc,&swatchRect,swatch);DeleteObject(swatch);
+        SelectObject(dc,fontSmall_);
+        std::wstring text=n.name;
+        if(text.size()>30) text=text.substr(0,29)+L"…";
+        textLine(dc,left+21,y-1,text,n.id==selectedNation_?Bright:Muted);
+        textLine(dc,left+21,y+16,L"Жителей: "+number(snap.nationStates[static_cast<size_t>(n.id)].population),RGB(118,142,159));
+        ++visible;
+    }
+    if(count>visible) textLine(dc,left,145+visible*35,L"И ещё "+number(count-visible)+L" государств…",Muted);
+    SelectObject(dc,fontSmall_);
+    textLine(dc,24,window.bottom-119,hint_,Muted);
+}
+void Application::paintMain(HDC dc) {
+    RECT rc{};GetClientRect(main_,&rc);
+    FillRect(dc,&rc,backgroundBrush_);
+    SetBkMode(dc,TRANSPARENT);
+    if(!started_) paintSetup(dc,rc);
+    else { RECT map=mapBounds(); paintWorld(dc,map);paintLegend(dc,map); }
+}
+void Application::clickMap(int x,int y) {
+    RECT r=mapBounds();
+    if(x<r.left||x>=r.right||y<r.top||y>=r.bottom) return;
+    int tileX=(x-r.left)*world_.settings().width/(r.right-r.left);
+    int tileY=(y-r.top)*world_.settings().height/(r.bottom-r.top);
+    tileX=std::clamp(tileX,0,world_.settings().width-1);
+    tileY=std::clamp(tileY,0,world_.settings().height-1);
+    int idx=world_.index(tileX,tileY);
+    int owner=world_.at(year_).owner[static_cast<size_t>(idx)];
+    if(owner>=0) openDetails(owner);
+    else {
+        hint_=world_.tiles()[static_cast<size_t>(idx)].terrain==Terrain::Sea?L"Это море. Выберите цветную область суши.":L"Эта территория пока не принадлежит ни одной державе.";
+        InvalidateRect(main_,nullptr,FALSE);
+    }
+}
+void Application::openDetails(int nation) {
+    if(!started_ || nation<0 || static_cast<size_t>(nation)>=world_.nations().size()) return;
+    selectedNation_=nation;selectedPerson_=-1;
+    if(!details_) {
+        details_=CreateWindowExW(WS_EX_APPWINDOW,DetailClass,L"Летопись государства",WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,
+                                 CW_USEDEFAULT,CW_USEDEFAULT,1120,730,main_,nullptr,instance_,this);
+        if(!details_) return;
+    }
+    updateDetails();
+    ShowWindow(details_,SW_SHOW);SetForegroundWindow(details_);
+    InvalidateRect(main_,nullptr,FALSE);
+}
+void Application::layoutDetails() {
+    if(!details_) return;
+    RECT rc{};GetClientRect(details_,&rc);
+    int w=std::max(620,rc.right),h=std::max(400,rc.bottom);
+    int leftW=std::max(300,(w*57)/100),rightX=leftW+30,rightW=std::max(140,w-rightX-20);
+    if(detailsTitle_) MoveWindow(detailsTitle_,18,15,w-30,47,TRUE);
+    if(detailsHistory_) MoveWindow(detailsHistory_,18,76,leftW-30,h-92,TRUE);
+    if(detailsShowDead_) MoveWindow(detailsShowDead_,rightX,78,rightW,26,TRUE);
+    int listH=std::max(145,(h-130)*43/100);
+    if(detailsPeople_) MoveWindow(detailsPeople_,rightX,108,rightW,listH,TRUE);
+    if(detailsBio_) MoveWindow(detailsBio_,rightX,115+listH,rightW,std::max(85,h-134-listH),TRUE);
+}
+void Application::updateDetails() {
+    if(!details_ || selectedNation_<0 || !started_) return;
+    const Nation& n=world_.nations()[static_cast<size_t>(selectedNation_)];
+    const Snapshot& snap=world_.at(year_);
+    bool exists=n.founded<=year_;
+    const NationYear* stats=exists && static_cast<size_t>(n.id)<snap.nationStates.size()?&snap.nationStates[static_cast<size_t>(n.id)]:nullptr;
+    std::wstring title=n.name+L" — "+number(year_)+L" год";
+    SetWindowTextW(details_,title.c_str());
+    SetWindowTextW(detailsTitle_,title.c_str());
+    std::wstring record=L"КУЛЬТУРА: "+std::wstring(speciesName(n.culture))+L"\r\n"+
+        overview(n.culture)+L"\r\n\r\n";
+    record+=L"ОСНОВАНО: "+yearLabel(n.founded)+L"\r\n";
+    if(!exists) record+=L"В этот год государство ещё не существовало.\r\n";
+    else if(stats) {
+        record+=L"ФОРМА ПРАВЛЕНИЯ: "+std::wstring(governmentName(stats->government))+L"\r\n";
+        record+=L"ЖИТЕЛЕЙ: "+number(stats->population)+L" (все учтены как отдельные персонажи)\r\n";
+        record+=L"ТЕРРИТОРИЯ: "+number(stats->territory)+L" клеток\r\n";
+        record+=L"ПОСЕЛЕНИЙ: "+number(stats->settlements)+L"\r\n";
+        record+=L"КАЗНА: "+number(stats->treasury)+L"  |  СТАБИЛЬНОСТЬ: "+number(stats->stability)+L"\r\n";
+        if(stats->ruler>=0 && static_cast<size_t>(stats->ruler)<world_.people().size())
+            record+=L"ПРАВИТЕЛЬ: "+world_.people()[static_cast<size_t>(stats->ruler)].name+L"\r\n";
+        if(n.vanished>=0 && year_>=n.vanished) record+=L"СТАТУС: государство распалось в "+number(n.vanished)+L" г.\r\n";
+        record+=L"\r\nПОСЕЛЕНИЯ\r\n";
+        int listed=0;
+        for(const auto& place:world_.settlements()) {
+            if(place.founded>year_ || snap.owner[static_cast<size_t>(world_.index(place.position.x,place.position.y))]!=n.id) continue;
+            record+=L"• "+place.name+L" ("+settlementName(place.kind)+L")\r\n";
+            if(++listed>=26) { record+=L"...\r\n";break; }
+        }
+        if(!listed) record+=L"Поселения не сохранились.\r\n";
+        record+=L"\r\nГИЛЬДИИ, КАРТЕЛИ, ОБЪЕДИНЕНИЯ\r\n";
+        listed=0;
+        for(const auto& guild:world_.guilds()) if(guild.nation==n.id && guild.founded<=year_) {
+            record+=L"• "+guild.name+L": "+guild.purpose+L"\r\n";
+            if(++listed>=18) {record+=L"...\r\n";break;}
+        }
+        if(!listed) record+=L"Сведений нет.\r\n";
+    }
+    record+=L"\r\nЛЕТОПИСЬ СОБЫТИЙ (новые сверху)\r\n";
+    int shown=0;
+    const auto& events=world_.events();
+    for(auto it=events.rbegin();it!=events.rend();++it) {
+        if(it->year>year_ || it->nation!=n.id) continue;
+        record+=L"["+number(it->year)+L"] "+it->text+L"\r\n";
+        if(++shown>=600) { record+=L"(Более ранние записи скрыты в окне; полный список доступен при экспорте.)\r\n";break; }
+    }
+    if(!shown) record+=L"Пока нет записей.\r\n";
+    SendMessageW(detailsHistory_,EM_SETLIMITTEXT,1000000,0);
+    SetWindowTextW(detailsHistory_,record.c_str());
+    SendMessageW(detailsHistory_,EM_SETSEL,0,0);
+    SendMessageW(detailsHistory_,EM_SCROLLCARET,0,0);
+    if(!detailsPeople_) return;
+    int previous=selectedPerson_;
+    SendMessageW(detailsPeople_,LB_RESETCONTENT,0,0);
+    bool includeDead=SendMessageW(detailsShowDead_,BM_GETCHECK,0,0)==BST_CHECKED;
+    int selectedRow=-1,rows=0;
+    const auto& people=world_.people();
+    for(auto it=people.rbegin();it!=people.rend();++it) {
+        const Person& p=*it;
+        if(p.born>year_) continue;
+        bool alive=world_.aliveAt(p,year_);
+        if(!includeDead && !alive) continue;
+        int relevantYear=alive?year_:std::max(p.born,p.died-1);
+        if(world_.nationAt(p,relevantYear)!=n.id) continue;
+        const PersonStage& stage=world_.stageAt(p,relevantYear);
+        std::wstring rowText=(alive?L"":L"† ")+p.name+L" — "+professionName(stage.profession);
+        LRESULT row=SendMessageW(detailsPeople_,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(rowText.c_str()));
+        if(row!=LB_ERR && row!=LB_ERRSPACE) {
+            SendMessageW(detailsPeople_,LB_SETITEMDATA,static_cast<WPARAM>(row),static_cast<LPARAM>(p.id));
+            if(p.id==previous) selectedRow=static_cast<int>(row);
+            if(++rows>=600) break;
+        }
+    }
+    if(selectedRow<0 && rows>0) selectedRow=0;
+    if(selectedRow>=0) {
+        SendMessageW(detailsPeople_,LB_SETCURSEL,static_cast<WPARAM>(selectedRow),0);
+        selectedPerson_=static_cast<int>(SendMessageW(detailsPeople_,LB_GETITEMDATA,static_cast<WPARAM>(selectedRow),0));
+    } else selectedPerson_=-1;
+    updateBiography();
+}
+void Application::updateBiography() {
+    if(!detailsBio_) return;
+    if(selectedPerson_<0 || static_cast<size_t>(selectedPerson_)>=world_.people().size()) {
+        SetWindowTextW(detailsBio_,L"Здесь появится личная история выбранного жителя.");return;
+    }
+    const auto& p=world_.people()[static_cast<size_t>(selectedPerson_)];
+    int relevantYear=std::min(year_,p.died==std::numeric_limits<int>::max()?year_:p.died-1);
+    const auto& stage=world_.stageAt(p,relevantYear);
+    std::wstring biography=p.name+L"\r\nРаса: "+speciesName(p.species)+L"\r\nРождение: "+yearLabel(p.born)+L"\r\n";
+    if(p.died<=year_) biography+=L"Смерть: "+yearLabel(p.died)+L"\r\n";
+    biography+=L"Профессия: "+std::wstring(professionName(stage.profession))+L"\r\n";
+    biography+=L"Положение: "+std::wstring(statusName(stage.status))+L"\r\n";
+    if(stage.guild>=0 && static_cast<size_t>(stage.guild)<world_.guilds().size()) biography+=L"Объединение: "+world_.guilds()[static_cast<size_t>(stage.guild)].name+L"\r\n";
+    if(p.homeSettlement>=0 && static_cast<size_t>(p.homeSettlement)<world_.settlements().size()) biography+=L"Родное поселение: "+world_.settlements()[static_cast<size_t>(p.homeSettlement)].name+L"\r\n";
+    biography+=L"\r\nБИОГРАФИЯ\r\n";
+    for(const auto& note:p.biography) if(note.year<=year_) biography+=L"["+number(note.year)+L"] "+note.text+L"\r\n";
+    SetWindowTextW(detailsBio_,biography.c_str());
+    SendMessageW(detailsBio_,EM_SETSEL,0,0);
+    SendMessageW(detailsBio_,EM_SCROLLCARET,0,0);
+}
+void Application::exportChronicle() {
+    if(!started_) return;
+    wchar_t path[MAX_PATH]=L"fantasy_chronicle.txt";
+    OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=main_;
+    dialog.lpstrFilter=L"Текстовый файл (*.txt)\0*.txt\0Все файлы (*.*)\0*.*\0";
+    dialog.lpstrFile=path;dialog.nMaxFile=MAX_PATH;dialog.lpstrDefExt=L"txt";
+    dialog.Flags=OFN_OVERWRITEPROMPT|OFN_PATHMUSTEXIST;
+    if(!GetSaveFileNameW(&dialog)) return;
+    HANDLE file=CreateFileW(path,GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(file==INVALID_HANDLE_VALUE) { MessageBoxW(main_,L"Не удалось открыть файл для записи.",L"Ошибка",MB_OK|MB_ICONERROR);return; }
+    const char bom[]{char(0xef),char(0xbb),char(0xbf)};
+    DWORD written{};WriteFile(file,bom,3,&written,nullptr);
+    bool ok=true;
+    auto output=[&](const std::wstring& s){ if(ok) ok=writeUtf8(file,s); };
+    output(L"ЛЕТОПИСЬ ФЭНТЕЗИЙНОГО МИРА\r\nЗерно: "+number(static_cast<int>(world_.settings().seed))+L". Период: 0–"+number(world_.settings().years)+L" гг.\r\n\r\n");
+    output(L"=== ГОСУДАРСТВА ===\r\n");
+    for(const auto& n:world_.nations()) {
+        output(n.name+L" | "+speciesName(n.culture)+L" | основано: "+number(n.founded)+
+               L" | конец: "+(n.vanished>=0?number(n.vanished):L"не наступил")+L"\r\n");
+    }
+    output(L"\r\n=== ИСТОРИЧЕСКИЕ СОБЫТИЯ ===\r\n");
+    for(const auto& event:world_.events()) {
+        const std::wstring nation=event.nation>=0?world_.nations()[static_cast<size_t>(event.nation)].name:L"Мир";
+        output(L"["+number(event.year)+L"] ["+nation+L"] "+event.text+L"\r\n");
+    }
+    output(L"\r\n=== ИМЕННЫЕ ЖИТЕЛИ И БИОГРАФИИ ===\r\n");
+    for(const auto& p:world_.people()) {
+        output(L"\r\n#"+number(p.id)+L" "+p.name+L" ("+speciesName(p.species)+L", "+number(p.born)+L"–"+
+               (p.died==std::numeric_limits<int>::max()?L"жив":number(p.died))+L")\r\n");
+        for(const auto& note:p.biography) output(L"  ["+number(note.year)+L"] "+note.text+L"\r\n");
+    }
+    CloseHandle(file);
+    if(!ok) MessageBoxW(main_,L"Ошибка записи. Файл может быть неполным.",L"Ошибка",MB_OK|MB_ICONERROR);
+    else MessageBoxW(main_,L"Летопись, события и биографии сохранены в UTF-8.",L"Экспорт завершён",MB_OK|MB_ICONINFORMATION);
+}
+LRESULT Application::dispatchMain(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
+    switch(msg) {
+    case WM_CREATE: onMainCreate();return 0;
+    case WM_GETMINMAXINFO: {
+        auto* info=reinterpret_cast<MINMAXINFO*>(l);
+        info->ptMinTrackSize.x=1050;info->ptMinTrackSize.y=680;
+        return 0;
+    }
+    case WM_SIZE: layoutMain();return 0;
+    case WM_ERASEBKGND: return 1;
+    case WM_CTLCOLORSTATIC:
+        SetTextColor(reinterpret_cast<HDC>(w),Bright);
+        SetBkMode(reinterpret_cast<HDC>(w),TRANSPARENT);
+        return reinterpret_cast<LRESULT>(backgroundBrush_);
+    case WM_PAINT: { PAINTSTRUCT ps{};HDC dc=BeginPaint(hwnd,&ps);paintMain(dc);EndPaint(hwnd,&ps);return 0; }
+    case WM_LBUTTONDOWN: if(started_) clickMap(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
+    case WM_COMMAND:
+        switch(LOWORD(w)) {
+            case ID_START: startGeneration();return 0;
+            case ID_PREVIOUS: setYear(year_-1);return 0;
+            case ID_NEXT: setYear(year_+1);return 0;
+            case ID_PLAY: togglePlay();return 0;
+            case ID_EXPORT: exportChronicle();return 0;
+            case ID_NEW: showSetup();return 0;
+        }
+        break;
+    case WM_HSCROLL:
+        if(reinterpret_cast<HWND>(l)==track_) setYear(static_cast<int>(SendMessageW(track_,TBM_GETPOS,0,0)));
+        return 0;
+    case WM_TIMER: if(w==1 && playing_) setYear(year_+1);return 0;
+    case WM_KEYDOWN:
+        if(started_) {
+            if(w==VK_LEFT) {setYear(year_-1);return 0;}
+            if(w==VK_RIGHT) {setYear(year_+1);return 0;}
+            if(w==VK_SPACE) {togglePlay();return 0;}
+        }
+        break;
+    case WM_DESTROY:
+        if(playing_) KillTimer(hwnd,1);
+        PostQuitMessage(0);return 0;
+    }
+    return DefWindowProcW(hwnd,msg,w,l);
+}
+LRESULT Application::dispatchDetails(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
+    switch(msg) {
+    case WM_CREATE:
+        detailsTitle_=createControl(hwnd,L"STATIC",L"История",SS_LEFT,0,18,15,700,45,0,fontTitle_);
+        detailsHistory_=createControl(hwnd,L"EDIT",L"",ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL,
+                                      0,18,76,600,570,WS_EX_CLIENTEDGE,fontSmall_);
+        detailsShowDead_=createControl(hwnd,L"BUTTON",L"Включить умерших жителей",BS_AUTOCHECKBOX,
+                                        ID_DEAD,650,78,310,27,0,fontSmall_);
+        detailsPeople_=createControl(hwnd,L"LISTBOX",L"",WS_VSCROLL|LBS_NOTIFY|LBS_NOINTEGRALHEIGHT,
+                                      ID_PEOPLE,650,108,400,250,WS_EX_CLIENTEDGE,fontSmall_);
+        detailsBio_=createControl(hwnd,L"EDIT",L"",ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL,
+                                   0,650,370,400,240,WS_EX_CLIENTEDGE,fontSmall_);
+        SendMessageW(detailsBio_,EM_SETLIMITTEXT,1000000,0);
+        layoutDetails();return 0;
+    case WM_GETMINMAXINFO: {
+        auto* info=reinterpret_cast<MINMAXINFO*>(l);
+        info->ptMinTrackSize.x=840;info->ptMinTrackSize.y=560;
+        return 0;
+    }
+    case WM_SIZE:layoutDetails();return 0;
+    case WM_COMMAND:
+        if(LOWORD(w)==ID_PEOPLE && HIWORD(w)==LBN_SELCHANGE) {
+            LRESULT selection=SendMessageW(detailsPeople_,LB_GETCURSEL,0,0);
+            if(selection!=LB_ERR) { selectedPerson_=static_cast<int>(SendMessageW(detailsPeople_,LB_GETITEMDATA,static_cast<WPARAM>(selection),0));updateBiography(); }
+            return 0;
+        }
+        if(LOWORD(w)==ID_DEAD && HIWORD(w)==BN_CLICKED) {updateDetails();return 0;}
+        break;
+    case WM_ERASEBKGND:return 1;
+    case WM_CTLCOLORSTATIC:
+        SetTextColor(reinterpret_cast<HDC>(w),Bright);
+        SetBkMode(reinterpret_cast<HDC>(w),TRANSPARENT);
+        return reinterpret_cast<LRESULT>(backgroundBrush_);
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};HDC dc=BeginPaint(hwnd,&ps);
+        RECT rc{};GetClientRect(hwnd,&rc);FillRect(dc,&rc,backgroundBrush_);
+        EndPaint(hwnd,&ps);return 0;
+    }
+    case WM_DESTROY:
+        details_=nullptr;detailsTitle_=nullptr;detailsHistory_=nullptr;detailsPeople_=nullptr;detailsBio_=nullptr;detailsShowDead_=nullptr;
+        selectedPerson_=-1;return 0;
+    }
+    return DefWindowProcW(hwnd,msg,w,l);
+}
+
+int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int show) {
+    Application app(instance);
+    return app.run(show);
+}

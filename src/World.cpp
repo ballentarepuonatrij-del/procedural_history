@@ -1,0 +1,227 @@
+#include "Fantasy/World.h"
+#include "Names.h"
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
+
+namespace fantasy {
+void World::registerModule(std::unique_ptr<IWorldModule> module) {
+    if(module) modules_.push_back(std::move(module));
+}
+void World::publishEvent(int year,int nation,const std::wstring& text) {
+    if(year<0 || year>settings_.years || nation<-1 || (nation>=0 && static_cast<size_t>(nation)>=nations_.size())) return;
+    addEvent(year,nation,text);
+}
+bool World::alterNation(int nation,int treasuryDelta,int stabilityDelta) {
+    if(nation<0 || static_cast<size_t>(nation)>=nationState_.size()) return false;
+    auto& s=nationState_[static_cast<size_t>(nation)];
+    s.treasury=std::clamp(s.treasury+treasuryDelta,0,100000);
+    s.stability=std::clamp(s.stability+stabilityDelta,0,100);
+    return true;
+}
+bool World::claimTile(int nation,int x,int y,int year) {
+    if(!inside(x,y) || nation<0 || static_cast<size_t>(nation)>=nations_.size() || nations_[static_cast<size_t>(nation)].founded>year) return false;
+    int idx=index(x,y);
+    if(tiles_[static_cast<size_t>(idx)].terrain==Terrain::Sea) return false;
+    owners_[static_cast<size_t>(idx)]=static_cast<int16_t>(nation);
+    return true;
+}
+bool World::addPersonNote(int person,int year,const std::wstring& text) {
+    if(person<0 || static_cast<size_t>(person)>=people_.size()) return false;
+    const auto& p=people_[static_cast<size_t>(person)];
+    if(year<p.born || year>settings_.years) return false;
+    addBiography(person,year,text);
+    return true;
+}
+int World::randomInt(int min, int max) { return std::uniform_int_distribution<int>(min,max)(rng_); }
+bool World::chance(double probability) { return std::bernoulli_distribution(std::clamp(probability,0.,1.))(rng_); }
+const Snapshot& World::at(int year) const {
+    if(timeline_.empty()) throw std::logic_error("World is not generated");
+    return timeline_[static_cast<size_t>(std::clamp(year,0,settings_.years))];
+}
+const PersonStage& World::stageAt(const Person& p, int year) const {
+    auto it=std::upper_bound(p.stages.begin(),p.stages.end(),year,[](int y,const PersonStage& s){return y<s.year;});
+    if(it==p.stages.begin()) return p.stages.front();
+    return *std::prev(it);
+}
+bool World::aliveAt(const Person& p, int year) const { return p.born<=year && year<p.died; }
+int World::nationAt(const Person& p, int year) const { return stageAt(p,year).nation; }
+void World::addEvent(int year,int nation,const std::wstring& msg,int person) { events_.push_back({year,nation,person,msg}); }
+void World::addBiography(int id,int year,const std::wstring& msg) { people_[static_cast<size_t>(id)].biography.push_back({year,msg}); }
+void World::changeStage(int id,int year,int nation,Profession profession,Status status,int guild) {
+    Person& p=people_[static_cast<size_t>(id)];
+    p.stages.push_back({year,nation,guild,profession,status});
+}
+int World::findSettlement(int nation, int year) const {
+    // Предпочитаем ближайшее к столице поселение на территории государства.
+    for(const auto& s:settlements_) if(s.founded<=year && owners_[static_cast<size_t>(index(s.position.x,s.position.y))]==nation) return s.id;
+    return -1;
+}
+void World::addSettlement(int nation,int year,Point pos,bool capital) {
+    if(!inside(pos.x,pos.y)) return;
+    for(const auto& s:settlements_) if(s.position.x==pos.x && s.position.y==pos.y) return;
+    Species kind=nations_[static_cast<size_t>(nation)].culture;
+    SettlementKind sk=SettlementKind::Village;
+    switch(kind) {
+        case Species::Human: sk=capital?SettlementKind::City:(chance(.22)?SettlementKind::Castle:SettlementKind::Village); break;
+        case Species::Elf: sk=SettlementKind::Grove; break;
+        case Species::Dwarf: sk=SettlementKind::MountainCity; break;
+        case Species::Outlaw: sk=SettlementKind::Hideout; break;
+        case Species::Folk: sk=SettlementKind::FairyVillage; break;
+    }
+    int id=static_cast<int>(settlements_.size());
+    settlements_.push_back({id,makeSettlementName(kind,nextSettlementName_++),pos,sk,year});
+    if(year>0) addEvent(year,nation,L"Основано поселение «"+settlements_.back().name+L"».");
+}
+int World::createNation(Species species,Point capital,int year) {
+    int id=static_cast<int>(nations_.size());
+    Nation n{id,makeNationName(species,id),species,startingGovernment(species,rng_),nationColor(id,species),capital,year,-1};
+    nations_.push_back(n);
+    NationYear state{};
+    state.government=n.startingGovernment;
+    state.stability=randomInt(48,88);
+    state.treasury=randomInt(90,220);
+    state.military=randomInt(17,52);
+    nationState_.push_back(state);
+    owners_[static_cast<size_t>(index(capital.x,capital.y))]=static_cast<int16_t>(id);
+    addSettlement(id,year,capital,true);
+    addEvent(year,id,L"Основано объединение «"+n.name+L"» ("+speciesName(species)+L").");
+    return id;
+}
+int World::addPerson(int nation,int year,bool newborn) {
+    Species main=nations_[static_cast<size_t>(nation)].culture;
+    Species species=main;
+    if(main==Species::Human && chance(.12)) species=chance(.5)?Species::Elf:Species::Dwarf;
+    if(main==Species::Outlaw) {
+        int roll=randomInt(0,99);
+        species=roll<61?Species::Human:roll<82?Species::Dwarf:roll<96?Species::Elf:Species::Folk;
+    }
+    if(main==Species::Elf && chance(.02)) species=Species::Human;
+    if(main==Species::Dwarf && chance(.03)) species=Species::Human;
+    int born=newborn?year:(year-randomInt(0,49));
+    int id=static_cast<int>(people_.size());
+    Person p{};
+    p.id=id;
+    p.name=(main==Species::Outlaw&&chance(.55))?makePersonName(Species::Outlaw,rng_):makePersonName(species,rng_);
+    p.species=species;
+    p.born=born; p.homeSettlement=findSettlement(nation,year);
+    Profession profession=newborn?Profession::Farmer:startingProfession(main,rng_);
+    const bool cityOutlaw=main==Species::Human && !newborn && chance(.08);
+    Status status=(main==Species::Outlaw||cityOutlaw)?Status::Outlaw:Status::Free;
+    if(cityOutlaw) profession=Profession::Thief;
+    p.stages.push_back({born,nation,-1,profession,status});
+    p.biography.push_back({born,L"Родился/родилась в землях «"+nations_[static_cast<size_t>(nation)].name+L"»."});
+    if(cityOutlaw) p.biography.push_back({0,L"Вступил/вступила в преступную группировку, действующую в городах государства."});
+    people_.push_back(std::move(p));
+    alive_.push_back(id);
+    return id;
+}
+void World::startPeople(int nation,int number,int year,bool newborn) {
+    for(int i=0;i<number;++i) addPerson(nation,year,newborn);
+}
+void World::addGuild(int nation,int year) {
+    Species type=nations_[static_cast<size_t>(nation)].culture;
+    std::wstring name,purpose;
+    switch(type) {
+        case Species::Human:
+            if(chance(.15)) {name=L"Теневой картель";purpose=L"Контрабанда, тайные договоры и теневые рынки";}
+            else {name=chance(.5)?L"Союз караванщиков":L"Коллегия мастеров";purpose=L"Торговля, ремёсла и защита монополий";}
+            break;
+        case Species::Elf: name=L"Круг хранителей рощ";purpose=L"Исцеление, охрана лесов и древние знания";break;
+        case Species::Dwarf: name=L"Цех шахтёров и кузнецов";purpose=L"Добыча руды, металлургия и горные промыслы";break;
+        case Species::Outlaw: name=L"Контрабандный картель";purpose=L"Нелегальная торговля, пиратство и подкуп";break;
+        case Species::Folk: name=L"Содружество тихих троп";purpose=L"Скрытные ремёсла, травничество и взаимопомощь";break;
+    }
+    int id=static_cast<int>(guilds_.size());
+    guilds_.push_back({id,nation,year,name+L" №"+std::to_wstring(id+1),purpose});
+    if(year>0) addEvent(year,nation,L"Основано объединение: "+guilds_.back().name+L".");
+    int recruited=0;
+    for(int pid:alive_) {
+        auto& p=people_[static_cast<size_t>(pid)];
+        const auto& stage=p.stages.back();
+        if(stage.nation!=nation || stage.guild!=-1 || p.born>year-15) continue;
+        if(chance(.10)) {
+            changeStage(pid,year,nation,stage.profession,stage.status,id);
+            addBiography(pid,year,L"Вступил/вступила в «"+guilds_.back().name+L"».");
+            if(++recruited>=8) break;
+        }
+    }
+}
+void World::initialNations() {
+    const Species sequence[]{Species::Human,Species::Elf,Species::Dwarf,Species::Outlaw,Species::Folk,
+                             Species::Human,Species::Human,Species::Elf,Species::Dwarf,Species::Human};
+    for(int i=0;i<settings_.civilizations;++i) {
+        Species species=sequence[static_cast<size_t>(i)%10];
+        Point capital=chooseCapital(species);
+        int id=createNation(species,capital,0);
+        // Небольшое первоначальное владение; дальнейшие границы изменяются по годам.
+        const int radius=species==Species::Folk?2:3;
+        for(int dy=-radius;dy<=radius;++dy) for(int dx=-radius;dx<=radius;++dx) {
+            int x=capital.x+dx,y=capital.y+dy;
+            if(!inside(x,y) || dx*dx+dy*dy>radius*radius) continue;
+            int ii=index(x,y);
+            if(tiles_[static_cast<size_t>(ii)].terrain!=Terrain::Sea && owners_[static_cast<size_t>(ii)]==-1)
+                owners_[static_cast<size_t>(ii)]=static_cast<int16_t>(id);
+        }
+        int pop=species==Species::Folk?35:species==Species::Outlaw?45:randomInt(55,78);
+        startPeople(id,pop,0,false);
+        addGuild(id,0);
+        if(species==Species::Human || species==Species::Dwarf) addGuild(id,0);
+        nationState_[static_cast<size_t>(id)].ruler=findRuler(id,0);
+    }
+    updateCensus();
+}
+int World::choosePerson(int nation,int minAge,int year) {
+    if(alive_.empty()) return -1;
+    auto canLead=[&](const Person& p) {
+        const auto& stage=stageAt(p,year);
+        return stage.status==Status::Free ||
+               (nations_[static_cast<size_t>(nation)].culture==Species::Outlaw && stage.status==Status::Outlaw);
+    };
+    for(int tries=0;tries<100;++tries) {
+        int id=alive_[static_cast<size_t>(randomInt(0,static_cast<int>(alive_.size())-1))];
+        const Person& p=people_[static_cast<size_t>(id)];
+        if(p.born<=year-minAge && nationAt(p,year)==nation && canLead(p)) return id;
+    }
+    for(int id:alive_) {
+        const Person& p=people_[static_cast<size_t>(id)];
+        if(p.born<=year-minAge && nationAt(p,year)==nation && canLead(p)) return id;
+    }
+    return -1;
+}
+int World::findRuler(int nation,int year) {
+    int id=choosePerson(nation,20,year);
+    if(id!=-1) addBiography(id,year,L"Возглавил/возглавила государство «"+nations_[static_cast<size_t>(nation)].name+L"».");
+    return id;
+}
+void World::updateCensus() {
+    for(auto& s:nationState_) { s.population=0; s.territory=0; s.settlements=0; }
+    for(int16_t id:owners_) if(id>=0 && static_cast<size_t>(id)<nationState_.size()) ++nationState_[static_cast<size_t>(id)].territory;
+    for(int id:alive_) {
+        const int nation=people_[static_cast<size_t>(id)].stages.back().nation;
+        if(nation>=0 && static_cast<size_t>(nation)<nationState_.size()) ++nationState_[static_cast<size_t>(nation)].population;
+    }
+    for(const auto& settlement:settlements_) {
+        int owner=owners_[static_cast<size_t>(index(settlement.position.x,settlement.position.y))];
+        if(owner>=0 && static_cast<size_t>(owner)<nationState_.size()) ++nationState_[static_cast<size_t>(owner)].settlements;
+    }
+}
+void World::capture(int year) { timeline_.push_back({year,owners_,nationState_}); }
+void World::generate(const Settings& requested) {
+    settings_=requested;
+    settings_.civilizations=std::clamp(settings_.civilizations,1,28);
+    settings_.years=std::clamp(settings_.years,1,400);
+    settings_.width=std::clamp(settings_.width,40,160);
+    settings_.height=std::clamp(settings_.height,30,100);
+    rng_.seed(settings_.seed);
+    tiles_.clear(); owners_.clear(); nations_.clear(); nationState_.clear(); people_.clear(); alive_.clear(); settlements_.clear(); guilds_.clear(); events_.clear(); interactions_.clear(); timeline_.clear(); nextSettlementName_=0;
+    createTerrain(); initialNations();
+    for(const auto& module:modules_) module->onWorldCreated(*this);
+    updateCensus(); capture(0);
+    for(int year=1;year<=settings_.years;++year) {
+        simulateYear(year);
+        for(const auto& module:modules_) module->onYear(*this,year);
+        updateCensus();capture(year);
+    }
+}
+} // namespace fantasy
