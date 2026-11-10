@@ -82,6 +82,8 @@ void World::simulatePopulation(int year) {
             p.biography.push_back({year,L"Умер/умерла в возрасте "+std::to_wstring(age)+L" лет."});
             int home=p.stages.back().nation;
             if(home>=0 && chance(.023)) addEvent(year,home,L"Скончался/скончалась «"+p.name+L"».",id);
+            if(p.homeSettlement>=0 && chance(.045))
+                addSettlementEvent(year,p.homeSettlement,L"Скончался уроженец поселения: «"+p.name+L"».");
         } else {
             survivors.push_back(id);
             if(age==16) {
@@ -323,6 +325,41 @@ void World::simulateRebellion(int year) {
     addEvent(year,parent,L"Восстание: от государства отделились земли «"+nations_[static_cast<size_t>(rebel)].name+L"».");
     addEvent(year,rebel,L"Восставшие добились независимости от «"+nations_[static_cast<size_t>(parent)].name+L"».");
 }
+void World::simulateSettlements(int year) {
+    // City-specific history survives changes of borders and even loss of statehood.
+    for(const Settlement& town:settlements_) {
+        if(town.founded>year) continue;
+        auto& state=settlementState_[static_cast<size_t>(town.id)];
+        int owner=owners_[static_cast<size_t>(index(town.position.x,town.position.y))];
+        if(owner<0) {
+            state.prosperity=std::max(0,state.prosperity-1);
+            continue;
+        }
+        state.prosperity=std::clamp(state.prosperity+randomInt(-2,2),0,100);
+        if(!chance(.060)) continue;
+        switch(randomInt(0,6)) {
+        case 0:
+            state.prosperity=std::min(100,state.prosperity+6);
+            addSettlementEvent(year,town.id,L"Состоялась большая ярмарка, оживившая ремесло и торговлю.");break;
+        case 1:
+            state.prosperity=std::min(100,state.prosperity+4);
+            addSettlementEvent(year,town.id,L"Мастера открыли новые мастерские и приняли учеников.");break;
+        case 2:
+            state.prosperity=std::max(0,state.prosperity-7);
+            addSettlementEvent(year,town.id,L"Неурожай и нехватка припасов осложнили жизнь жителей.");break;
+        case 3:
+            state.prosperity=std::max(0,state.prosperity-5);
+            addSettlementEvent(year,town.id,L"Нападение разбойников нанесло ущерб окрестностям.");break;
+        case 4:
+            addSettlementEvent(year,town.id,L"Местные жители укрепили стены и сторожевые посты.");break;
+        case 5:
+            state.prosperity=std::min(100,state.prosperity+3);
+            addSettlementEvent(year,town.id,L"В поселение прибыли переселенцы и торговые караваны.");break;
+        default:
+            addSettlementEvent(year,town.id,L"Собрание общины урегулировало спор между жителями.");break;
+        }
+    }
+}
 void World::simulateYear(int year) {
     updateCensus();
     simulatePolitics(year);
@@ -331,6 +368,7 @@ void World::simulateYear(int year) {
     simulateSociety(year);
     simulateInteractions(year);
     simulateRebellion(year);
+    simulateSettlements(year);
     updateCensus();
     for(size_t n=0;n<nations_.size();++n) if(nations_[n].vanished<0 && nations_[n].founded<year && nationState_[n].territory==0) {
         nations_[n].vanished=year;
