@@ -691,10 +691,17 @@ LRESULT Application::dispatchDetails(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
         if(LOWORD(w)==ID_DEAD && HIWORD(w)==BN_CLICKED) {updateDetails();return 0;}
         break;
     case WM_ERASEBKGND:return 1;
-    case WM_CTLCOLORSTATIC:
-        SetTextColor(reinterpret_cast<HDC>(w),Bright);
-        SetBkMode(reinterpret_cast<HDC>(w),TRANSPARENT);
+    case WM_CTLCOLORSTATIC: {
+        HDC dc=reinterpret_cast<HDC>(w);
+        HWND control=reinterpret_cast<HWND>(l);
+        SetTextColor(dc,Bright);
+        SetBkColor(dc,Background);
+        // Read-only EDIT windows send WM_CTLCOLORSTATIC too.  Transparent text
+        // leaves old glyphs on screen when the multi-line control scrolls.
+        bool isEdit=control==detailsHistory_ || control==detailsBio_;
+        SetBkMode(dc,isEdit?OPAQUE:TRANSPARENT);
         return reinterpret_cast<LRESULT>(backgroundBrush_);
+    }
     case WM_PAINT: {
         PAINTSTRUCT ps{};HDC dc=BeginPaint(hwnd,&ps);
         RECT rc{};GetClientRect(hwnd,&rc);FillRect(dc,&rc,backgroundBrush_);
