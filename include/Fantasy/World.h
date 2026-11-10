@@ -34,10 +34,16 @@ struct NationYear {
     int population{}, territory{}, treasury{150}, stability{70}, military{30};
     int settlements{}, ruler{-1};
 };
+struct SettlementYear {
+    int owner{-1};
+    int knownResidents{};  // named living people born here and affiliated with the current owner
+    int prosperity{50};
+};
 struct Snapshot {
     int year{};
     std::vector<int16_t> owner; // -1 = ничейная территория / море
     std::vector<NationYear> nationStates;
+    std::vector<SettlementYear> settlementStates;
 };
 struct PersonStage {
     int year{}, nation{-1}, guild{-1};
@@ -60,6 +66,11 @@ struct Settlement {
     Point position{};
     SettlementKind kind{SettlementKind::Village};
     int founded{};
+    int foundingNation{-1};
+};
+struct SettlementEvent {
+    int year{}, settlement{-1};
+    std::wstring text;
 };
 struct Guild {
     int id{}, nation{}, founded{};
@@ -100,6 +111,7 @@ public:
     bool alterNation(int nation, int treasuryDelta, int stabilityDelta);
     bool claimTile(int nation, int x, int y, int year);
     bool addPersonNote(int personId, int year, const std::wstring& text);
+    bool publishSettlementEvent(int year, int settlementId, const std::wstring& text);
     const std::vector<int16_t>& liveOwners() const { return owners_; }
     const std::vector<NationYear>& liveStates() const { return nationState_; }
     void generate(const Settings& settings);
@@ -108,6 +120,7 @@ public:
     const std::vector<Nation>& nations() const { return nations_; }
     const std::vector<Person>& people() const { return people_; }
     const std::vector<Settlement>& settlements() const { return settlements_; }
+    const std::vector<SettlementEvent>& settlementEvents() const { return settlementEvents_; }
     const std::vector<Guild>& guilds() const { return guilds_; }
     const std::vector<Event>& events() const { return events_; }
     const std::vector<Interaction>& interactions() const { return interactions_; }
@@ -129,6 +142,8 @@ private:
     std::vector<Person> people_;
     std::vector<int> alive_;
     std::vector<Settlement> settlements_;
+    std::vector<SettlementYear> settlementState_;
+    std::vector<SettlementEvent> settlementEvents_;
     std::vector<Guild> guilds_;
     std::vector<Event> events_;
     std::vector<Interaction> interactions_;
@@ -147,6 +162,7 @@ private:
     void addGuild(int nation, int year);
     void addSettlement(int nation, int year, Point position, bool capital);
     void addEvent(int year, int nation, const std::wstring& text, int person = -1);
+    void addSettlementEvent(int year, int settlement, const std::wstring& text);
     void addBiography(int personId, int year, const std::wstring& text);
     void changeStage(int personId, int year, int nation, Profession profession, Status status, int guild);
     void simulateYear(int year);
@@ -156,6 +172,7 @@ private:
     void simulateSociety(int year);
     void simulateInteractions(int year);
     void simulateRebellion(int year);
+    void simulateSettlements(int year);
     void updateCensus();
     void capture(int year);
     int choosePerson(int nation, int minAge, int year);
