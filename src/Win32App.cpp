@@ -263,7 +263,7 @@ void Application::showSetup() {
 }
 RECT Application::mapBounds() const {
     RECT bounds{}; GetClientRect(main_,&bounds);
-    int areaW=std::max(220,bounds.right-348),areaH=std::max(160,bounds.bottom-206);
+    int areaW=std::max(220,static_cast<int>(bounds.right)-348),areaH=std::max(160,static_cast<int>(bounds.bottom)-206);
     double scale=std::min(double(areaW)/world_.settings().width,double(areaH)/world_.settings().height);
     int w=std::max(1,static_cast<int>(world_.settings().width*scale));
     int h=std::max(1,static_cast<int>(world_.settings().height*scale));
@@ -274,7 +274,7 @@ void Application::layoutMain() {
     if(!main_) return;
     RECT rc{};GetClientRect(main_,&rc);
     if(!runtimeControls_.empty()) {
-        int bottom=std::max(480,rc.bottom-77);
+        int bottom=std::max(480,static_cast<int>(rc.bottom)-77);
         int side=rc.right-15;
         MoveWindow(runtimeControls_[0],24,bottom,81,36,TRUE);
         MoveWindow(runtimeControls_[1],110,bottom,81,36,TRUE);
@@ -317,7 +317,7 @@ void Application::paintSetup(HDC dc,const RECT& bounds) {
     SelectObject(dc,font_);
     textLine(dc,71,138,L"Генерация географии, государств и истории каждого жителя",Muted);
     textLine(dc,71,170,L"Выберите начальные условия, затем изучайте изменения мира по годам.",Muted);
-    int right=std::max(530,bounds.right/2+20);
+    int right=std::max(530,static_cast<int>(bounds.right)/2+20);
     SelectObject(dc,fontTitle_);
     textLine(dc,right,234,L"Пять культур");
     SelectObject(dc,font_);
@@ -328,7 +328,7 @@ void Application::paintSetup(HDC dc,const RECT& bounds) {
         L"Сказочный народец — тайные лесные общины"};
     for(int i=0;i<5;++i) textLine(dc,right,295+i*48,descriptions[i],Muted);
     SelectObject(dc,fontSmall_);
-    textLine(dc,71,std::max(615,bounds.bottom-90),L"Модель хранит отдельные биографии и события. Численность населения намеренно ограничена для скорости симуляции.",Muted);
+    textLine(dc,71,std::max(615,static_cast<int>(bounds.bottom)-90),L"Модель хранит отдельные биографии и события. Численность населения намеренно ограничена для скорости симуляции.",Muted);
 }
 void Application::paintWorld(HDC dc,const RECT& bounds) {
     const Snapshot& snap=world_.at(year_);
@@ -419,7 +419,7 @@ void Application::paintLegend(HDC dc,const RECT& map) {
     textLine(dc,left,96,L"Государства");
     const Snapshot& snap=world_.at(year_);
     int count=0,visible=0;
-    const int maxVisible=std::max(5,(map.bottom-map.top-40)/35);
+    const int maxVisible=std::max(5,static_cast<int>(map.bottom-map.top-40)/35);
     for(const Nation& n:world_.nations()) {
         if(n.founded>year_ || n.id>=static_cast<int>(snap.nationStates.size()) || snap.nationStates[static_cast<size_t>(n.id)].territory<=0) continue;
         ++count;
@@ -475,7 +475,7 @@ void Application::openDetails(int nation) {
 void Application::layoutDetails() {
     if(!details_) return;
     RECT rc{};GetClientRect(details_,&rc);
-    int w=std::max(620,rc.right),h=std::max(400,rc.bottom);
+    int w=std::max(620,static_cast<int>(rc.right)),h=std::max(400,static_cast<int>(rc.bottom));
     int leftW=std::max(300,(w*57)/100),rightX=leftW+30,rightW=std::max(140,w-rightX-20);
     if(detailsTitle_) MoveWindow(detailsTitle_,18,15,w-30,47,TRUE);
     if(detailsHistory_) MoveWindow(detailsHistory_,18,76,leftW-30,h-92,TRUE);
@@ -594,7 +594,7 @@ void Application::exportChronicle() {
     if(!GetSaveFileNameW(&dialog)) return;
     HANDLE file=CreateFileW(path,GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(file==INVALID_HANDLE_VALUE) { MessageBoxW(main_,L"Не удалось открыть файл для записи.",L"Ошибка",MB_OK|MB_ICONERROR);return; }
-    const char bom[]{char(0xef),char(0xbb),char(0xbf)};
+    const char bom[]{static_cast<char>(0xEF),static_cast<char>(0xBB),static_cast<char>(0xBF)};
     DWORD written{};WriteFile(file,bom,3,&written,nullptr);
     bool ok=true;
     auto output=[&](const std::wstring& s){ if(ok) ok=writeUtf8(file,s); };
