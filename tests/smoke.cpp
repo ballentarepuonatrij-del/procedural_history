@@ -1,4 +1,5 @@
 #include "Fantasy/World.h"
+#include "Fantasy/MapCamera.h"
 #include "../examples/MagicPortentsModule.h"
 #include <cassert>
 #include <iostream>
@@ -14,6 +15,52 @@ int main() {
     assert(!w.guilds().empty());
     assert(!w.interactions().empty());
     assert(!w.settlements().empty());
+    assert(!w.settlementEvents().empty());
+    for(int year=0;year<=settings.years;++year) {
+        const auto& snap=w.at(year);
+        size_t founded=0;
+        for(const auto& town:w.settlements()) {
+            if(town.founded>year) continue;
+            ++founded;
+            assert(static_cast<size_t>(town.id)<snap.settlementStates.size());
+            const auto& state=snap.settlementStates[static_cast<size_t>(town.id)];
+            assert(state.owner==snap.owner[static_cast<size_t>(w.index(town.position.x,town.position.y))]);
+            assert(state.prosperity>=0 && state.prosperity<=100);
+            assert(state.knownResidents>=0);
+            assert(town.foundingNation>=0);
+            assert(w.nations()[static_cast<size_t>(town.foundingNation)].founded<=town.founded);
+        }
+        assert(snap.settlementStates.size()==founded);
+    }
+    for(const auto& note:w.settlementEvents()) {
+        assert(note.settlement>=0 && static_cast<size_t>(note.settlement)<w.settlements().size());
+        assert(note.year>=w.settlements()[static_cast<size_t>(note.settlement)].founded);
+        assert(note.year<=settings.years);
+        assert(!note.text.empty());
+    }
+    fantasy::MapCamera camera;
+    camera.reset(88,52);
+    camera.setViewport({24,88,1024,688});
+    assert(std::abs(camera.zoom()-1.)<1.e-10);
+    auto center=camera.worldToScreen(44,26);
+    auto restored=camera.screenToWorld(center.x,center.y);
+    assert(std::abs(restored.x-44)<1.e-8 && std::abs(restored.y-26)<1.e-8);
+    auto pivot=camera.screenToWorld(610,360);
+    camera.zoomAt(610,360,2.);
+    auto samePivot=camera.screenToWorld(610,360);
+    assert(std::abs(pivot.x-samePivot.x)<1.e-8);
+    assert(std::abs(pivot.y-samePivot.y)<1.e-8);
+    auto beforePan=camera.screenToWorld(610,360);
+    camera.panPixels(40,-20);
+    auto afterPan=camera.screenToWorld(610,360);
+    assert(afterPan.x<beforePan.x && afterPan.y>beforePan.y);
+    camera.panPixels(-100000,-100000); // bounded by world edges
+    auto rect=camera.drawnRect();
+    assert(rect.right>=1024 && rect.bottom>=688);
+    camera.zoomAt(610,360,.00001);
+    assert(camera.zoom()==1.);
+    auto fitted=camera.drawnRect();
+    assert(fitted.width()<=1000 && fitted.height()<=600);
     bool hadPirates=false;
     for(const auto& n:w.nations()) {
         if(n.founded==0 && n.culture==fantasy::Species::Outlaw) {
@@ -46,6 +93,12 @@ int main() {
     fantasy::World again; again.generate(settings);
     assert(w.at(80).owner==again.at(80).owner);
     assert(w.people().size()==again.people().size());
+    assert(w.settlementEvents().size()==again.settlementEvents().size());
+    assert(w.at(80).settlementStates.size()==again.at(80).settlementStates.size());
+    for(size_t i=0;i<w.at(80).settlementStates.size();++i) {
+        assert(w.at(80).settlementStates[i].owner==again.at(80).settlementStates[i].owner);
+        assert(w.at(80).settlementStates[i].prosperity==again.at(80).settlementStates[i].prosperity);
+    }
     fantasy::World withModule;
     withModule.registerModule(std::make_unique<MagicPortentsModule>());
     withModule.generate(settings);
@@ -54,5 +107,7 @@ int main() {
     assert(foundMagic);
     std::cout << "OK: " << w.nations().size() << " nations; " << w.people().size()
               << " named persons; " << w.events().size() << " historical events; "
-              << changed << " changed cells.\n";
+              << changed << " changed cells; "
+              << w.settlements().size() << " settlements; "
+              << w.settlementEvents().size() << " local events.\n";
 }
