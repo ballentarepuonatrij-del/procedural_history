@@ -33,6 +33,12 @@ bool World::addPersonNote(int person,int year,const std::wstring& text) {
     addBiography(person,year,text);
     return true;
 }
+bool World::publishSettlementEvent(int year,int settlementId,const std::wstring& text) {
+    if(year<0 || year>settings_.years || settlementId<0 || static_cast<size_t>(settlementId)>=settlements_.size() ||
+       year<settlements_[static_cast<size_t>(settlementId)].founded) return false;
+    addSettlementEvent(year,settlementId,text);
+    return true;
+}
 int World::randomInt(int min, int max) { return std::uniform_int_distribution<int>(min,max)(rng_); }
 bool World::chance(double probability) { return std::bernoulli_distribution(std::clamp(probability,0.,1.))(rng_); }
 const Snapshot& World::at(int year) const {
@@ -47,6 +53,9 @@ const PersonStage& World::stageAt(const Person& p, int year) const {
 bool World::aliveAt(const Person& p, int year) const { return p.born<=year && year<p.died; }
 int World::nationAt(const Person& p, int year) const { return stageAt(p,year).nation; }
 void World::addEvent(int year,int nation,const std::wstring& msg,int person) { events_.push_back({year,nation,person,msg}); }
+void World::addSettlementEvent(int year,int id,const std::wstring& msg) {
+    settlementEvents_.push_back({year,id,msg});
+}
 void World::addBiography(int id,int year,const std::wstring& msg) { people_[static_cast<size_t>(id)].biography.push_back({year,msg}); }
 void World::changeStage(int id,int year,int nation,Profession profession,Status status,int guild) {
     Person& p=people_[static_cast<size_t>(id)];
@@ -70,7 +79,10 @@ void World::addSettlement(int nation,int year,Point pos,bool capital) {
         case Species::Folk: sk=SettlementKind::FairyVillage; break;
     }
     int id=static_cast<int>(settlements_.size());
-    settlements_.push_back({id,makeSettlementName(kind,nextSettlementName_++),pos,sk,year});
+    settlements_.push_back({id,makeSettlementName(kind,nextSettlementName_++),pos,sk,year,nation});
+    settlementState_.push_back({nation,0,randomInt(38,78)});
+    addSettlementEvent(year,id,L"Основано поселение «"+settlements_.back().name+L"» государством «"+
+                            nations_[static_cast<size_t>(nation)].name+L"».");
     if(year>0) addEvent(year,nation,L"Основано поселение «"+settlements_.back().name+L"».");
 }
 int World::createNation(Species species,Point capital,int year) {
@@ -104,7 +116,16 @@ int World::addPerson(int nation,int year,bool newborn) {
     p.id=id;
     p.name=(main==Species::Outlaw&&chance(.55))?makePersonName(Species::Outlaw,rng_):makePersonName(species,rng_);
     p.species=species;
-    p.born=born; p.homeSettlement=findSettlement(nation,year);
+    p.born=born;
+    // Distribute births and initial inhabitants among the actual settlements,
+    // rather than attributing everybody to the first town of the country.
+    std::vector<int> possibleHomes;
+    for(const auto& town:settlements_) {
+        if(town.founded<=year && owners_[static_cast<size_t>(index(town.position.x,town.position.y))]==nation)
+            possibleHomes.push_back(town.id);
+    }
+    p.homeSettlement=possibleHomes.empty()?-1:
+        possibleHomes[static_cast<size_t>(randomInt(0,static_cast<int>(possibleHomes.size())-1))];
     Profession profession=newborn?Profession::Farmer:startingProfession(main,rng_);
     const bool cityOutlaw=main==Species::Human && !newborn && chance(.08);
     Status status=(main==Species::Outlaw||cityOutlaw)?Status::Outlaw:Status::Free;
@@ -113,6 +134,8 @@ int World::addPerson(int nation,int year,bool newborn) {
     p.biography.push_back({born,L"Родился/родилась в землях «"+nations_[static_cast<size_t>(nation)].name+L"»."});
     if(cityOutlaw) p.biography.push_back({0,L"Вступил/вступила в преступную группировку, действующую в городах государства."});
     people_.push_back(std::move(p));
+    if(newborn && people_.back().homeSettlement>=0 && chance(.055))
+        addSettlementEvent(year,people_.back().homeSettlement,L"Родился новый житель: «"+people_.back().name+L"».");
     alive_.push_back(id);
     return id;
 }
@@ -134,6 +157,8 @@ void World::addGuild(int nation,int year) {
     }
     int id=static_cast<int>(guilds_.size());
     guilds_.push_back({id,nation,year,name+L" №"+std::to_wstring(id+1),purpose});
+    const int town=findSettlement(nation,year);
+    if(town>=0) addSettlementEvent(year,town,L"Начало действовать объединение «"+guilds_.back().name+L"»: "+purpose+L".");
     if(year>0) addEvent(year,nation,L"Основано объединение: "+guilds_.back().name+L".");
     int recruited=0;
     for(int pid:alive_) {
@@ -206,7 +231,34 @@ void World::updateCensus() {
         if(owner>=0 && static_cast<size_t>(owner)<nationState_.size()) ++nationState_[static_cast<size_t>(owner)].settlements;
     }
 }
-void World::capture(int year) { timeline_.push_back({year,owners_,nationState_}); }
+void World::capture(int year) {
+    for(const Settlement& town:settlements_) {
+        auto& state=settlementState_[static_cast<size_t>(town.id)];
+        if(town.founded>year) continue;
+        const int owner=owners_[static_cast<size_t>(index(town.position.x,town.position.y))];
+        if(state.owner!=owner) {
+            std::wstring event;
+            if(owner<0) event=L"Поселение оказалось вне власти государств.";
+            else if(state.owner<0) event=L"Поселение вошло в состав «"+nations_[static_cast<size_t>(owner)].name+L"».";
+            else event=L"Поселение перешло от «"+nations_[static_cast<size_t>(state.owner)].name+
+                            L"» к «"+nations_[static_cast<size_t>(owner)].name+L"».";
+            addSettlementEvent(year,town.id,event);
+            state.owner=owner;
+            state.prosperity=std::clamp(state.prosperity-9,0,100);
+        }
+        state.knownResidents=0;
+    }
+    // Residency is not independently simulated yet.  The counter reflects named
+    // natives still associated with their birthplace and its current polity.
+    for(int id:alive_) {
+        const Person& person=people_[static_cast<size_t>(id)];
+        const int home=person.homeSettlement;
+        if(home<0 || static_cast<size_t>(home)>=settlements_.size()) continue;
+        auto& state=settlementState_[static_cast<size_t>(home)];
+        if(state.owner>=0 && person.stages.back().nation==state.owner) ++state.knownResidents;
+    }
+    timeline_.push_back({year,owners_,nationState_,settlementState_});
+}
 void World::generate(const Settings& requested) {
     settings_=requested;
     settings_.civilizations=std::clamp(settings_.civilizations,1,28);
@@ -214,7 +266,7 @@ void World::generate(const Settings& requested) {
     settings_.width=std::clamp(settings_.width,40,160);
     settings_.height=std::clamp(settings_.height,30,100);
     rng_.seed(settings_.seed);
-    tiles_.clear(); owners_.clear(); nations_.clear(); nationState_.clear(); people_.clear(); alive_.clear(); settlements_.clear(); guilds_.clear(); events_.clear(); interactions_.clear(); timeline_.clear(); nextSettlementName_=0;
+    tiles_.clear(); owners_.clear(); nations_.clear(); nationState_.clear(); people_.clear(); alive_.clear(); settlements_.clear(); settlementState_.clear(); settlementEvents_.clear(); guilds_.clear(); events_.clear(); interactions_.clear(); timeline_.clear(); nextSettlementName_=0;
     createTerrain(); initialNations();
     for(const auto& module:modules_) module->onWorldCreated(*this);
     updateCensus(); capture(0);
