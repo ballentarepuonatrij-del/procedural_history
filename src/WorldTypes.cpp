@@ -22,3 +22,31 @@ const wchar_t* settlementName(SettlementKind x) {
     return L"?";
 }
 } // namespace fantasy
+
+namespace fantasy {
+const wchar_t* abilityName(Ability v) {
+    switch(v) {
+    case Ability::Strength: return L"Сила"; case Ability::Agility: return L"Ловкость";
+    case Ability::Intellect: return L"Интеллект"; case Ability::Charisma: return L"Харизма";
+    case Ability::Endurance: return L"Выносливость"; case Ability::Willpower: return L"Сила воли";
+    default: return L"?";
+    }
+}
+const wchar_t* skillName(Skill v) {
+    switch(v) {
+    case Skill::Combat: return L"Военное дело"; case Skill::Craft: return L"Ремесло";
+    case Skill::Trade: return L"Торговля"; case Skill::Lore: return L"Знания";
+    case Skill::Diplomacy: return L"Дипломатия"; case Skill::Survival: return L"Выживание";
+    case Skill::Stealth: return L"Скрытность"; case Skill::Healing: return L"Целительство";
+    default: return L"?";
+    }
+}
+const wchar_t* personalityName(Personality v) {
+    switch(v) {
+    case Personality::Courage: return L"Смелость"; case Personality::Curiosity: return L"Любознательность";
+    case Personality::Ambition: return L"Честолюбие"; case Personality::Empathy: return L"Сочувствие";
+    case Personality::Discipline: return L"Дисциплина";
+    default: return L"?";
+    }
+}
+} // namespace fantasy
