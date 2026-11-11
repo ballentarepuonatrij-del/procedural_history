@@ -694,6 +694,26 @@ void Application::updateBiography() {
     biography+=L"Положение: "+std::wstring(statusName(stage.status))+L"\r\n";
     if(stage.guild>=0 && static_cast<size_t>(stage.guild)<world_.guilds().size()) biography+=L"Объединение: "+world_.guilds()[static_cast<size_t>(stage.guild)].name+L"\r\n";
     if(p.homeSettlement>=0 && static_cast<size_t>(p.homeSettlement)<world_.settlements().size()) biography+=L"Родное поселение: "+world_.settlements()[static_cast<size_t>(p.homeSettlement)].name+L"\r\n";
+    // Show the character exactly as they were in the selected year, not at
+    // the end of the simulation.  Dead residents retain their last known stats.
+    const auto& stats=world_.statsAt(p,relevantYear);
+    biography+=L"\r\nРАЗВИТИЕ ЛИЧНОСТИ — "+yearLabel(relevantYear)+L"\r\n";
+    biography+=L"Значения: 0–100; в скобках — начальный уровень.\r\n";
+    biography+=L"\r\nСПОСОБНОСТИ\r\n";
+    for(size_t i=0;i<static_cast<size_t>(Ability::Count);++i) {
+        biography+=std::wstring(abilityName(static_cast<Ability>(i)))+L": "+
+            number(stats.abilities[i])+L" (было "+number(p.innate.abilities[i])+L")\r\n";
+    }
+    biography+=L"\r\nНАВЫКИ\r\n";
+    for(size_t i=0;i<static_cast<size_t>(Skill::Count);++i) {
+        biography+=std::wstring(skillName(static_cast<Skill>(i)))+L": "+
+            number(stats.skills[i])+L" (было "+number(p.innate.skills[i])+L")\r\n";
+    }
+    biography+=L"\r\nЧЕРТЫ ХАРАКТЕРА\r\n";
+    for(size_t i=0;i<static_cast<size_t>(Personality::Count);++i) {
+        biography+=std::wstring(personalityName(static_cast<Personality>(i)))+L": "+
+            number(stats.traits[i])+L" (было "+number(p.innate.traits[i])+L")\r\n";
+    }
     biography+=L"\r\nБИОГРАФИЯ\r\n";
     for(const auto& note:p.biography) if(note.year<=year_) biography+=L"["+number(note.year)+L"] "+note.text+L"\r\n";
     SetWindowTextW(detailsBio_,biography.c_str());
@@ -736,6 +756,17 @@ void Application::exportChronicle() {
     for(const auto& p:world_.people()) {
         output(L"\r\n#"+number(p.id)+L" "+p.name+L" ("+speciesName(p.species)+L", "+number(p.born)+L"–"+
                (p.died==std::numeric_limits<int>::max()?L"жив":number(p.died))+L")\r\n");
+        const auto& stats=world_.statsAt(p,p.died==std::numeric_limits<int>::max()?world_.settings().years:p.died-1);
+        output(L"  Итоговые способности (0–100): ");
+        for(size_t i=0;i<static_cast<size_t>(Ability::Count);++i)
+            output(std::wstring(abilityName(static_cast<Ability>(i)))+L"="+number(stats.abilities[i])+L"; ");
+        output(L"\r\n  Итоговые навыки: ");
+        for(size_t i=0;i<static_cast<size_t>(Skill::Count);++i)
+            output(std::wstring(skillName(static_cast<Skill>(i)))+L"="+number(stats.skills[i])+L"; ");
+        output(L"\r\n  Черты характера: ");
+        for(size_t i=0;i<static_cast<size_t>(Personality::Count);++i)
+            output(std::wstring(personalityName(static_cast<Personality>(i)))+L"="+number(stats.traits[i])+L"; ");
+        output(L"\r\n");
         for(const auto& note:p.biography) output(L"  ["+number(note.year)+L"] "+note.text+L"\r\n");
     }
     CloseHandle(file);
