@@ -10,6 +10,7 @@ add_library(FantasyCore STATIC
     src/Names.cpp
     src/Geography.cpp
     src/World.cpp
+    src/CharacterDevelopment.cpp
     src/Simulation.cpp
 )
 target_include_directories(FantasyCore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
