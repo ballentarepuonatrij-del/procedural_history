@@ -178,6 +178,7 @@ void World::simulateSociety(int year) {
                     changeStage(id,year,n,stage.profession,stage.status,guild);
                     addBiography(id,year,L"Присоединился/присоединилась к объединению «"+guilds_[static_cast<size_t>(guild)].name+L"».");
                 } else {
+                    applyLifeExperience(id,LifeExperience::Achievement);
                     addBiography(id,year,L"Прославился/прославилась профессиональным мастерством.");
                 }
             }
@@ -188,10 +189,10 @@ void World::simulateSociety(int year) {
                 auto& p=people_[static_cast<size_t>(id)];
                 std::wstring incident;
                 switch(randomInt(0,3)) {
-                    case 0: incident=L"Отправился/отправилась в дальнюю экспедицию.";break;
-                    case 1: incident=L"Получил/получила признание ремесленной гильдии.";break;
-                    case 2: incident=L"Вступил/вступила в спор с местными властями.";break;
-                    default: incident=L"Участвовал/участвовала в большой ярмарке.";break;
+                    case 0: incident=L"Отправился/отправилась в дальнюю экспедицию.";applyLifeExperience(id,LifeExperience::Journey);break;
+                    case 1: incident=L"Получил/получила признание ремесленной гильдии.";applyLifeExperience(id,LifeExperience::Achievement);break;
+                    case 2: incident=L"Вступил/вступила в спор с местными властями.";applyLifeExperience(id,LifeExperience::Dispute);break;
+                    default: incident=L"Участвовал/участвовала в большой ярмарке.";applyLifeExperience(id,LifeExperience::Trade);break;
                 }
                 p.biography.push_back({year,incident});
                 if(chance(.15)) addEvent(year,n,p.name+L": "+incident,id);
@@ -270,6 +271,17 @@ void World::simulateInteractions(int year) {
             case InteractionKind::Crime: action=L"Оказались участниками криминальной сделки";break;
         }
         interactions_.push_back({year,a,b,kind});
+        LifeExperience lived=LifeExperience::Friendship;
+        switch(kind) {
+        case InteractionKind::Partnership: lived=LifeExperience::Trade;break;
+        case InteractionKind::Friendship: lived=LifeExperience::Friendship;break;
+        case InteractionKind::Rivalry: lived=LifeExperience::Rivalry;break;
+        case InteractionKind::Mentorship: lived=LifeExperience::Mentorship;break;
+        case InteractionKind::Marriage: lived=LifeExperience::Marriage;break;
+        case InteractionKind::Crime: lived=LifeExperience::Crime;break;
+        }
+        applyLifeExperience(a,lived);
+        applyLifeExperience(b,lived);
         addBiography(a,year,action+L" с «"+bn+L"»." );
         addBiography(b,year,action+L" с «"+an+L"»." );
         if(chance(.26)) addEvent(year,static_cast<int>(nation),an+L" и "+bn+L": "+action+L".");
@@ -369,6 +381,7 @@ void World::simulateYear(int year) {
     simulateInteractions(year);
     simulateRebellion(year);
     simulateSettlements(year);
+    developCharacters(year);
     updateCensus();
     for(size_t n=0;n<nations_.size();++n) if(nations_[n].vanished<0 && nations_[n].founded<year && nationState_[n].territory==0) {
         nations_[n].vanished=year;
