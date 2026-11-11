@@ -33,6 +33,13 @@ bool World::addPersonNote(int person,int year,const std::wstring& text) {
     addBiography(person,year,text);
     return true;
 }
+bool World::grantExperience(int id,int year,LifeExperience experience) {
+    if(id<0 || static_cast<size_t>(id)>=people_.size() || year<0 || year>settings_.years) return false;
+    const auto& p=people_[static_cast<size_t>(id)];
+    if(!aliveAt(p,year)) return false;
+    applyLifeExperience(id,experience);
+    return true;
+}
 bool World::publishSettlementEvent(int year,int settlementId,const std::wstring& text) {
     if(year<0 || year>settings_.years || settlementId<0 || static_cast<size_t>(settlementId)>=settlements_.size() ||
        year<settlements_[static_cast<size_t>(settlementId)].founded) return false;
@@ -50,6 +57,13 @@ const PersonStage& World::stageAt(const Person& p, int year) const {
     if(it==p.stages.begin()) return p.stages.front();
     return *std::prev(it);
 }
+const CharacterStats& World::statsAt(const Person& p, int year) const {
+    if(p.development.empty()) return p.innate;
+    auto it=std::upper_bound(p.development.begin(),p.development.end(),year,
+        [](int y,const CharacterYear& item){ return y<item.year; });
+    if(it==p.development.begin()) return it->stats;
+    return std::prev(it)->stats;
+}
 bool World::aliveAt(const Person& p, int year) const { return p.born<=year && year<p.died; }
 int World::nationAt(const Person& p, int year) const { return stageAt(p,year).nation; }
 void World::addEvent(int year,int nation,const std::wstring& msg,int person) { events_.push_back({year,nation,person,msg}); }
@@ -59,6 +73,20 @@ void World::addSettlementEvent(int year,int id,const std::wstring& msg) {
 void World::addBiography(int id,int year,const std::wstring& msg) { people_[static_cast<size_t>(id)].biography.push_back({year,msg}); }
 void World::changeStage(int id,int year,int nation,Profession profession,Status status,int guild) {
     Person& p=people_[static_cast<size_t>(id)];
+    if(!p.stages.empty()) {
+        const auto previous=p.stages.back();
+        if(previous.guild!=guild && guild>=0) applyLifeExperience(id,LifeExperience::Guild);
+        if(previous.profession!=profession) {
+            // Initial retraining: effort and discipline, followed by profession-specific learning.
+            p.current.traits[static_cast<size_t>(Personality::Discipline)]=static_cast<uint8_t>(
+                std::min(100,static_cast<int>(p.current.traits[static_cast<size_t>(Personality::Discipline)])+1));
+        }
+        if(previous.status!=status) {
+            if(status==Status::Enslaved) applyLifeExperience(id,LifeExperience::Captivity);
+            else if(previous.status==Status::Enslaved) applyLifeExperience(id,LifeExperience::Freedom);
+        }
+        if(previous.nation!=nation && nation>=0) applyLifeExperience(id,LifeExperience::Rebellion);
+    }
     p.stages.push_back({year,nation,guild,profession,status});
 }
 int World::findSettlement(int nation, int year) const {
@@ -134,6 +162,7 @@ int World::addPerson(int nation,int year,bool newborn) {
     p.biography.push_back({born,L"Родился/родилась в землях «"+nations_[static_cast<size_t>(nation)].name+L"»."});
     if(cityOutlaw) p.biography.push_back({0,L"Вступил/вступила в преступную группировку, действующую в городах государства."});
     people_.push_back(std::move(p));
+    initializeCharacter(id,year);
     if(newborn && people_.back().homeSettlement>=0 && chance(.055))
         addSettlementEvent(year,people_.back().homeSettlement,L"Родился новый житель: «"+people_.back().name+L"».");
     alive_.push_back(id);
@@ -215,9 +244,29 @@ int World::choosePerson(int nation,int minAge,int year) {
     return -1;
 }
 int World::findRuler(int nation,int year) {
-    int id=choosePerson(nation,20,year);
-    if(id!=-1) addBiography(id,year,L"Возглавил/возглавила государство «"+nations_[static_cast<size_t>(nation)].name+L"».");
-    return id;
+    // Rulers are selected based on developed leadership skills, not purely at random.
+    int winner=-1;
+    int best=std::numeric_limits<int>::min();
+    for(int id:alive_) {
+        const Person& p=people_[static_cast<size_t>(id)];
+        if(p.born>year-20 || nationAt(p,year)!=nation) continue;
+        const auto& st=stageAt(p,year);
+        if(st.status!=Status::Free && !(nations_[static_cast<size_t>(nation)].culture==Species::Outlaw && st.status==Status::Outlaw)) continue;
+        const auto& c=p.current;
+        int score=static_cast<int>(c.abilities[static_cast<size_t>(Ability::Charisma)])+
+                  static_cast<int>(c.abilities[static_cast<size_t>(Ability::Willpower)])+
+                  static_cast<int>(c.skills[static_cast<size_t>(Skill::Diplomacy)])+
+                  static_cast<int>(c.traits[static_cast<size_t>(Personality::Ambition)]);
+        if(nations_[static_cast<size_t>(nation)].culture==Species::Outlaw)
+            score+=static_cast<int>(c.skills[static_cast<size_t>(Skill::Combat)])+
+                   static_cast<int>(c.skills[static_cast<size_t>(Skill::Stealth)]);
+        if(score>best) { best=score;winner=id; }
+    }
+    if(winner!=-1) {
+        applyLifeExperience(winner,LifeExperience::Leadership);
+        addBiography(winner,year,L"Возглавил/возглавила государство «"+nations_[static_cast<size_t>(nation)].name+L"».");
+    }
+    return winner;
 }
 void World::updateCensus() {
     for(auto& s:nationState_) { s.population=0; s.territory=0; s.settlements=0; }
@@ -257,6 +306,7 @@ void World::capture(int year) {
         auto& state=settlementState_[static_cast<size_t>(home)];
         if(state.owner>=0 && person.stages.back().nation==state.owner) ++state.knownResidents;
     }
+    recordCharacterProgress(year);
     timeline_.push_back({year,owners_,nationState_,settlementState_});
 }
 void World::generate(const Settings& requested) {
