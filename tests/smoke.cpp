@@ -77,13 +77,31 @@ int main() {
         for(auto owner:snap.owner) assert(owner==-1 || (owner>=0 && static_cast<size_t>(owner)<w.nations().size() && w.nations()[static_cast<size_t>(owner)].founded<=year));
         for(const auto& p:w.people()) if(w.aliveAt(p,year)) assert(w.nationAt(p,year)>=0);
     }
+    size_t peopleWhoDeveloped=0;
     for(const auto& p:w.people()) {
+        assert(!p.development.empty());
+        assert(p.development.front().year==std::max(0,p.born));
+        assert(p.development.back().year==std::min(settings.years,p.died-1));
+        assert(w.statsAt(p,p.development.front().year)==p.development.front().stats);
+        assert(w.statsAt(p,settings.years)==p.development.back().stats);
+        for(size_t j=1;j<p.development.size();++j) {
+            assert(p.development[j].year==p.development[j-1].year+1);
+            // Binary search at an earlier year must never leak later values.
+            assert(w.statsAt(p,p.development[j-1].year)==p.development[j-1].stats);
+        }
+        for(const auto& entry:p.development) {
+            for(auto x:entry.stats.abilities) assert(x<=100);
+            for(auto x:entry.stats.skills) assert(x<=100);
+            for(auto x:entry.stats.traits) assert(x<=100);
+        }
+        if(p.development.front().stats!=p.development.back().stats) ++peopleWhoDeveloped;
         assert(!p.biography.empty());
         assert(!p.stages.empty());
         assert(p.stages.front().year>=p.born);
         for(const auto& note:p.biography) assert(note.year>=p.born);
         for(size_t k=1;k<p.stages.size();++k) assert(p.stages[k].year>=p.stages[k-1].year);
     }
+    assert(peopleWhoDeveloped>100);
     for(const auto& relation:w.interactions()) {
         assert(relation.first!=relation.second);
         assert(relation.year>=0 && relation.year<=settings.years);
@@ -93,6 +111,13 @@ int main() {
     fantasy::World again; again.generate(settings);
     assert(w.at(80).owner==again.at(80).owner);
     assert(w.people().size()==again.people().size());
+    for(size_t i=0;i<w.people().size();++i) {
+        const auto& a=w.people()[i],&b=again.people()[i];
+        assert(a.innate==b.innate);
+        assert(a.development.size()==b.development.size());
+        for(size_t yearIndex=0;yearIndex<a.development.size();++yearIndex)
+            assert(a.development[yearIndex].stats==b.development[yearIndex].stats);
+    }
     assert(w.settlementEvents().size()==again.settlementEvents().size());
     assert(w.at(80).settlementStates.size()==again.at(80).settlementStates.size());
     for(size_t i=0;i<w.at(80).settlementStates.size();++i) {
@@ -102,6 +127,10 @@ int main() {
     fantasy::World withModule;
     withModule.registerModule(std::make_unique<MagicPortentsModule>());
     withModule.generate(settings);
+    bool granted=withModule.grantExperience(0,settings.years,fantasy::LifeExperience::Mentorship);
+    if(withModule.aliveAt(withModule.people()[0],settings.years)) assert(granted);
+    else assert(!granted);
+    assert(!withModule.grantExperience(-1,settings.years,fantasy::LifeExperience::Journey));
     bool foundMagic=false;
     for(const auto& event:withModule.events()) if(event.text.find(L"Небесное знамение")!=std::wstring::npos) foundMagic=true;
     assert(foundMagic);
