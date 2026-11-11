@@ -1,4 +1,6 @@
 #pragma once
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -50,6 +52,19 @@ struct PersonStage {
     Profession profession{Profession::Farmer};
     Status status{Status::Free};
 };
+// Values are clamped to 0..100. Enums are stable indices in these arrays.
+enum class Ability : size_t { Strength, Agility, Intellect, Charisma, Endurance, Willpower, Count };
+enum class Skill : size_t { Combat, Craft, Trade, Lore, Diplomacy, Survival, Stealth, Healing, Count };
+enum class Personality : size_t { Courage, Curiosity, Ambition, Empathy, Discipline, Count };
+struct CharacterStats {
+    std::array<uint8_t, static_cast<size_t>(Ability::Count)> abilities{};
+    std::array<uint8_t, static_cast<size_t>(Skill::Count)> skills{};
+    std::array<uint8_t, static_cast<size_t>(Personality::Count)> traits{};
+    bool operator==(const CharacterStats&) const = default;
+};
+struct CharacterYear { int year{}; CharacterStats stats{}; };
+enum class LifeExperience { Guild, Achievement, Journey, Trade, Dispute, Captivity, Freedom,
+                            Friendship, Rivalry, Mentorship, Marriage, Crime, Leadership, Rebellion };
 struct PersonNote { int year{}; std::wstring text; };
 struct Person {
     int id{};
@@ -58,6 +73,9 @@ struct Person {
     int born{}, died{std::numeric_limits<int>::max()};
     int homeSettlement{-1};
     std::vector<PersonStage> stages;
+    CharacterStats innate{};             // Starting potential, retained for comparison
+    CharacterStats current{};            // Updated during simulation
+    std::vector<CharacterYear> development; // Year-by-year history; unaffected by future years
     std::vector<PersonNote> biography;
 };
 struct Settlement {
@@ -93,6 +111,9 @@ const wchar_t* governmentName(Government value);
 const wchar_t* professionName(Profession value);
 const wchar_t* statusName(Status value);
 const wchar_t* settlementName(SettlementKind value);
+const wchar_t* abilityName(Ability value);
+const wchar_t* skillName(Skill value);
+const wchar_t* personalityName(Personality value);
 
 class World;
 
@@ -111,6 +132,8 @@ public:
     bool alterNation(int nation, int treasuryDelta, int stabilityDelta);
     bool claimTile(int nation, int x, int y, int year);
     bool addPersonNote(int personId, int year, const std::wstring& text);
+    // Extension hook: modules can let a living person learn from an event.
+    bool grantExperience(int personId, int year, LifeExperience experience);
     bool publishSettlementEvent(int year, int settlementId, const std::wstring& text);
     const std::vector<int16_t>& liveOwners() const { return owners_; }
     const std::vector<NationYear>& liveStates() const { return nationState_; }
@@ -126,6 +149,7 @@ public:
     const std::vector<Interaction>& interactions() const { return interactions_; }
     const Snapshot& at(int year) const;
     const PersonStage& stageAt(const Person& person, int year) const;
+    const CharacterStats& statsAt(const Person& person, int year) const;
     bool aliveAt(const Person& person, int year) const;
     int nationAt(const Person& person, int year) const;
     int index(int x, int y) const { return y * settings_.width + x; }
@@ -165,6 +189,10 @@ private:
     void addSettlementEvent(int year, int settlement, const std::wstring& text);
     void addBiography(int personId, int year, const std::wstring& text);
     void changeStage(int personId, int year, int nation, Profession profession, Status status, int guild);
+    void initializeCharacter(int personId, int year);
+    void developCharacters(int year);
+    void applyLifeExperience(int personId, LifeExperience experience);
+    void recordCharacterProgress(int year);
     void simulateYear(int year);
     void simulatePolitics(int year);
     void simulateTerritories(int year);
