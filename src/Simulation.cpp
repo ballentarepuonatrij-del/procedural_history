@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <utility>
 
 namespace fantasy {
 int World::chooseFrontierTile(int nation, bool unclaimedOnly) {
@@ -90,6 +91,10 @@ void World::simulatePopulation(int year) {
                 PersonStage before=p.stages.back();
                 if(before.status==Status::Free) {
                     Profession next=startingProfession(nations_[static_cast<size_t>(before.nation)].culture,rng_);
+                    // Family apprenticeship influences the first adult profession.
+                    const int parent=(p.parentA>=0 && aliveAt(people_[static_cast<size_t>(p.parentA)],year))?p.parentA:
+                        (p.parentB>=0 && aliveAt(people_[static_cast<size_t>(p.parentB)],year)?p.parentB:-1);
+                    if(parent>=0 && chance(.65)) next=stageAt(people_[static_cast<size_t>(parent)],year).profession;
                     changeStage(id,year,before.nation,next,before.status,before.guild);
                     addBiography(id,year,L"Освоил/освоила ремесло: "+std::wstring(professionName(next))+L".");
                 }
@@ -97,6 +102,19 @@ void World::simulatePopulation(int year) {
         }
     }
     alive_=std::move(survivors);
+    // Close unions when a partner dies; surviving spouses can remarry.
+    for(size_t i=0;i<people_.size();++i) if(people_[i].died==year && currentSpouses_[i]>=0) {
+        const int partner=currentSpouses_[i];
+        currentSpouses_[i]=-1;
+        if(currentSpouses_[static_cast<size_t>(partner)]==static_cast<int>(i)) {
+            currentSpouses_[static_cast<size_t>(partner)]=-1;
+            if(aliveAt(people_[static_cast<size_t>(partner)],year))
+                addBiography(partner,year,L"Овдовел/овдовела: умер супруг/супруга «"+people_[i].name+L"».");
+        }
+    }
+    // Estates pass to living descendants first, otherwise to surviving spouses.
+    for(size_t i=0;i<people_.size();++i) if(people_[i].died==year) settleInheritance(static_cast<int>(i),year);
+    formMarriages(year);
     std::vector<int> counts(nations_.size(),0);
     for(int id:alive_) {
         int nation=people_[static_cast<size_t>(id)].stages.back().nation;
@@ -113,7 +131,24 @@ void World::simulatePopulation(int year) {
             double rate=kind==Species::Elf?.018:kind==Species::Dwarf?.024:.035;
             for(int attempt=0;attempt<std::min(7,capacity);++attempt) if(chance(rate*std::min(10.,capacity/12.))) ++births;
         }
-        for(int i=0;i<births;++i) addPerson(static_cast<int>(n),year,true);
+        std::vector<std::pair<int,int>> couples;
+        for(int id:alive_) {
+            const int spouse=currentSpouses_[static_cast<size_t>(id)];
+            if(spouse<0 || spouse<=id) continue;
+            const auto& a=people_[static_cast<size_t>(id)];
+            const auto& b=people_[static_cast<size_t>(spouse)];
+            if(a.stages.back().nation!=static_cast<int>(n) || b.stages.back().nation!=static_cast<int>(n)) continue;
+            if(a.stages.back().status==Status::Enslaved || b.stages.back().status==Status::Enslaved) continue;
+            const int ageA=year-a.born,ageB=year-b.born;
+            const int limitA=a.species==Species::Elf?150:a.species==Species::Dwarf?100:65;
+            const int limitB=b.species==Species::Elf?150:b.species==Species::Dwarf?100:65;
+            if(ageA>=18 && ageB>=18 && ageA<=limitA && ageB<=limitB) couples.emplace_back(id,spouse);
+        }
+        if(couples.empty()) births=0;
+        for(int i=0;i<births;++i) {
+            const auto [a,b]=couples[static_cast<size_t>(randomInt(0,static_cast<int>(couples.size())-1))];
+            addChild(static_cast<int>(n),year,a,b);
+        }
         if(births>=4 && chance(.10)) addEvent(year,static_cast<int>(n),L"В городах и селениях наблюдается прирост населения.");
     }
 }
@@ -128,8 +163,18 @@ void World::simulatePolitics(int year) {
            nationAt(people_[static_cast<size_t>(state.ruler)],year)!=static_cast<int>(i) ||
            (stageAt(people_[static_cast<size_t>(state.ruler)],year).status!=Status::Free &&
             !(nations_[i].culture==Species::Outlaw && stageAt(people_[static_cast<size_t>(state.ruler)],year).status==Status::Outlaw))) {
-            state.ruler=findRuler(static_cast<int>(i),year);
-            if(state.ruler>=0) addEvent(year,static_cast<int>(i),L"К власти пришёл/пришла «"+people_[static_cast<size_t>(state.ruler)].name+L"».",state.ruler);
+            const int predecessor=state.ruler;
+            state.ruler=findRuler(static_cast<int>(i),year,predecessor);
+            if(state.ruler>=0) {
+                const bool hereditary=state.government==Government::Monarchy && predecessor>=0 &&
+                    isDescendantOf(state.ruler,predecessor);
+                addEvent(year,static_cast<int>(i),hereditary?
+                    L"Престол унаследовал/унаследовала «"+people_[static_cast<size_t>(state.ruler)].name+
+                       L"» от «"+people_[static_cast<size_t>(predecessor)].name+L"»." :
+                    L"К власти пришёл/пришла «"+people_[static_cast<size_t>(state.ruler)].name+L"».",state.ruler);
+                if(hereditary) addBiography(state.ruler,year,L"Унаследовал/унаследовала престол после родственника «"+
+                    people_[static_cast<size_t>(predecessor)].name+L"».");
+            }
         }
         if(chance(.008) && nations_[i].culture==Species::Human) {
             const auto next=static_cast<Government>(randomInt(0,5));
@@ -259,6 +304,11 @@ void World::simulateInteractions(int year) {
         int b=choosePerson(static_cast<int>(nation),16,year);
         if(a<0 || b<0 || a==b) continue;
         auto kind=static_cast<InteractionKind>(randomInt(0,5));
+        // Marriage is a persistent historical relation, unlike a casual encounter.
+        if(kind==InteractionKind::Marriage) {
+            marry(a,b,year); // Will reject unrelated, too-young or married people
+            continue;
+        }
         const std::wstring& an=people_[static_cast<size_t>(a)].name;
         const std::wstring& bn=people_[static_cast<size_t>(b)].name;
         std::wstring action;
