@@ -62,7 +62,14 @@ struct CharacterStats {
     std::array<uint8_t, static_cast<size_t>(Personality::Count)> traits{};
     bool operator==(const CharacterStats&) const = default;
 };
-struct CharacterYear { int year{}; CharacterStats stats{}; };
+struct CharacterYear { int year{}; CharacterStats stats{}; int wealth{}; };
+struct Family {
+    int id{}, founder{}, founded{};
+    std::wstring name;        // Ancestral house: each person belongs to one birth lineage
+};
+struct Marriage { int year{}, first{}, second{}; }; // Historical union, may end by death
+struct Inheritance { int year{}, from{}, to{}, wealth{}; };
+
 enum class LifeExperience { Guild, Achievement, Journey, Trade, Dispute, Captivity, Freedom,
                             Friendship, Rivalry, Mentorship, Marriage, Crime, Leadership, Rebellion };
 struct PersonNote { int year{}; std::wstring text; };
@@ -72,6 +79,10 @@ struct Person {
     Species species{Species::Human};
     int born{}, died{std::numeric_limits<int>::max()};
     int homeSettlement{-1};
+    int parentA{-1}, parentB{-1}; // Recorded biological parents (IDs, not names)
+    int family{-1};              // Birth house is stable even after marriage
+    std::vector<int> children;   // IDs in chronological order
+    int wealth{};                // Transferable estate, not national treasury
     std::vector<PersonStage> stages;
     CharacterStats innate{};             // Starting potential, retained for comparison
     CharacterStats current{};            // Updated during simulation
@@ -147,6 +158,12 @@ public:
     const std::vector<Guild>& guilds() const { return guilds_; }
     const std::vector<Event>& events() const { return events_; }
     const std::vector<Interaction>& interactions() const { return interactions_; }
+    const std::vector<Family>& families() const { return families_; }
+    const std::vector<Marriage>& marriages() const { return marriages_; }
+    const std::vector<Inheritance>& inheritances() const { return inheritances_; }
+    int spouseAt(const Person& person, int year) const;
+    int wealthAt(const Person& person, int year) const;
+    bool isDescendantOf(int person, int ancestor) const;
     const Snapshot& at(int year) const;
     const PersonStage& stageAt(const Person& person, int year) const;
     const CharacterStats& statsAt(const Person& person, int year) const;
@@ -171,6 +188,10 @@ private:
     std::vector<Guild> guilds_;
     std::vector<Event> events_;
     std::vector<Interaction> interactions_;
+    std::vector<Family> families_;
+    std::vector<Marriage> marriages_;
+    std::vector<Inheritance> inheritances_;
+    std::vector<int> currentSpouses_; // Live-year index; historical lookup uses marriages_
     std::vector<Snapshot> timeline_;
     std::vector<std::unique_ptr<IWorldModule>> modules_;
     int nextSettlementName_{};
@@ -183,6 +204,12 @@ private:
     Point chooseCapital(Species species);
     void startPeople(int nation, int number, int year, bool newborn);
     int addPerson(int nation, int year, bool newborn);
+    int addChild(int nation, int year, int parentA, int parentB);
+    void formMarriages(int year);
+    void seedFoundingFamilies();
+    bool marry(int first, int second, int year);
+    void settleInheritance(int personId, int year);
+    void inheritCharacter(int child, int first, int second);
     void addGuild(int nation, int year);
     void addSettlement(int nation, int year, Point position, bool capital);
     void addEvent(int year, int nation, const std::wstring& text, int person = -1);
@@ -206,7 +233,7 @@ private:
     int choosePerson(int nation, int minAge, int year);
     int chooseFrontierTile(int nation, bool unclaimedOnly);
     int findSettlement(int nation, int year) const;
-    int findRuler(int nation, int year);
+    int findRuler(int nation,int year,int predecessor=-1);
 };
 
 } // namespace fantasy
