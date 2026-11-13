@@ -2,6 +2,8 @@
 #include "Fantasy/MapCamera.h"
 #include "../examples/MagicPortentsModule.h"
 #include <cassert>
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <string>
 int main() {
@@ -102,6 +104,57 @@ int main() {
         for(size_t k=1;k<p.stages.size();++k) assert(p.stages[k].year>=p.stages[k-1].year);
     }
     assert(peopleWhoDeveloped>100);
+    // A birth belongs to two actual adults, a stable house, and a real union.
+    assert(!w.families().empty());
+    assert(!w.marriages().empty());
+    int tracedBirths=0;
+    for(const auto& p:w.people()) {
+        assert(p.family>=0 && static_cast<size_t>(p.family)<w.families().size());
+        assert(w.wealthAt(p,p.development.front().year)==p.development.front().wealth);
+        for(const auto& entry:p.development) {
+            assert(entry.wealth>=0);
+            assert(w.wealthAt(p,entry.year)==entry.wealth);
+        }
+        if(p.parentA<0) { assert(p.parentB<0);continue; }
+        ++tracedBirths;
+        assert(p.parentB>=0);
+        assert(p.parentA<p.id && p.parentB<p.id && p.parentA!=p.parentB);
+        const auto& a=w.people()[static_cast<size_t>(p.parentA)];
+        const auto& b=w.people()[static_cast<size_t>(p.parentB)];
+        assert(a.born<=p.born-18 && b.born<=p.born-18);
+        assert(w.isDescendantOf(p.id,p.parentA));
+        assert(w.isDescendantOf(p.id,p.parentB));
+        assert(p.family==a.family || p.family==b.family);
+        assert(std::find(a.children.begin(),a.children.end(),p.id)!=a.children.end());
+        assert(std::find(b.children.begin(),b.children.end(),p.id)!=b.children.end());
+        for(size_t i=0;i<p.innate.abilities.size();++i) {
+            const int average=(static_cast<int>(a.innate.abilities[i])+b.innate.abilities[i])/2;
+            assert(std::abs(static_cast<int>(p.innate.abilities[i])-average)<=14);
+        }
+        for(size_t i=0;i<p.innate.traits.size();++i) {
+            const int average=(static_cast<int>(a.innate.traits[i])+b.innate.traits[i])/2;
+            assert(std::abs(static_cast<int>(p.innate.traits[i])-average)<=18);
+        }
+    }
+    assert(tracedBirths>40);
+    for(const auto& marriage:w.marriages()) {
+        assert(marriage.first!=marriage.second);
+        assert(marriage.year>=0 && marriage.year<=settings.years);
+        assert(static_cast<size_t>(marriage.first)<w.people().size());
+        assert(static_cast<size_t>(marriage.second)<w.people().size());
+        const auto& a=w.people()[static_cast<size_t>(marriage.first)];
+        const auto& b=w.people()[static_cast<size_t>(marriage.second)];
+        assert(a.born+18<=marriage.year && b.born+18<=marriage.year);
+        assert(!w.isDescendantOf(a.id,b.id) && !w.isDescendantOf(b.id,a.id));
+    }
+    for(const auto& inheritance:w.inheritances()) {
+        assert(inheritance.wealth>0);
+        assert(w.people()[static_cast<size_t>(inheritance.from)].died==inheritance.year);
+        const auto& heir=w.people()[static_cast<size_t>(inheritance.to)];
+        assert(w.aliveAt(heir,inheritance.year));
+        assert(w.wealthAt(heir,inheritance.year)>=0); // income and expenses also apply this year
+    }
+
     for(const auto& relation:w.interactions()) {
         assert(relation.first!=relation.second);
         assert(relation.year>=0 && relation.year<=settings.years);
@@ -114,10 +167,16 @@ int main() {
     for(size_t i=0;i<w.people().size();++i) {
         const auto& a=w.people()[i],&b=again.people()[i];
         assert(a.innate==b.innate);
+        assert(a.parentA==b.parentA && a.parentB==b.parentB);
+        assert(a.family==b.family && a.children==b.children);
         assert(a.development.size()==b.development.size());
         for(size_t yearIndex=0;yearIndex<a.development.size();++yearIndex)
             assert(a.development[yearIndex].stats==b.development[yearIndex].stats);
+        for(size_t yearIndex=0;yearIndex<a.development.size();++yearIndex)
+            assert(a.development[yearIndex].wealth==b.development[yearIndex].wealth);
     }
+    assert(w.marriages().size()==again.marriages().size());
+    assert(w.inheritances().size()==again.inheritances().size());
     assert(w.settlementEvents().size()==again.settlementEvents().size());
     assert(w.at(80).settlementStates.size()==again.at(80).settlementStates.size());
     for(size_t i=0;i<w.at(80).settlementStates.size();++i) {
@@ -138,5 +197,7 @@ int main() {
               << " named persons; " << w.events().size() << " historical events; "
               << changed << " changed cells; "
               << w.settlements().size() << " settlements; "
-              << w.settlementEvents().size() << " local events.\n";
+              << w.settlementEvents().size() << " local events; "
+              << w.families().size() << " houses; " << w.marriages().size() << " marriages; "
+              << tracedBirths << " traced births; " << w.inheritances().size() << " inheritances.\n";
 }
