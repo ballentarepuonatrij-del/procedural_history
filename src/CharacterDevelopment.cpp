@@ -121,6 +121,18 @@ void World::developCharacters(int year) {
         if(age==oldAge(p.species)) {
             addBiography(id,year,L"Вступил/вступила в поздний период жизни; накопленные знания и возраст меняют способности.");
         }
+        // Parents transmit skills by upbringing, not only inherited genetic potential.
+        // References are stable IDs; parental death stops future personal teaching.
+        if(age>=7 && age<=17 && p.parentA>=0) {
+            int guardian=(aliveAt(people_[static_cast<size_t>(p.parentA)],year))?p.parentA:
+                (p.parentB>=0 && aliveAt(people_[static_cast<size_t>(p.parentB)],year)?p.parentB:-1);
+            if(guardian>=0 && chance(.52)) {
+                const auto& parent=people_[static_cast<size_t>(guardian)];
+                adjust(c.skills[idx(vocation(stageAt(parent,year).profession))],1);
+                if(chance(.16)) adjust(c.traits[idx(T::Discipline)],1);
+                if(age==7) addBiography(id,year,L"Получил/получила первые уроки ремесла в семье.");
+            }
+        }
         if(age>=7) {
             const auto& stage=p.stages.back();
             S primary=vocation(stage.profession);
@@ -160,6 +172,13 @@ void World::developCharacters(int year) {
                 addBiography(id,year,L"Учился/училась у опытного наставника и повысил/повысила своё мастерство.");break;
             }
         }
+        if(age>=16) {
+            const auto profession=p.stages.back().profession;
+            int earned=profession==Profession::Noble?7:profession==Profession::Merchant?5:
+                       profession==Profession::Artisan?4:profession==Profession::Thief?3:2;
+            if(p.stages.back().status==Status::Enslaved) earned=0;
+            p.wealth=std::clamp(p.wealth+earned-randomInt(0,3),0,100000);
+        }
         if(age>oldAge(p.species) && year%3==0) {
             // Gradual physical decline; knowledge and personality are retained.
             adjust(c.abilities[idx(A::Strength)],-1);
@@ -173,7 +192,7 @@ void World::recordCharacterProgress(int year) {
     for(int id:alive_) {
         auto& p=people_[static_cast<size_t>(id)];
         if(p.development.empty() || p.development.back().year<year)
-            p.development.push_back({year,p.current});
+            p.development.push_back({year,p.current,p.wealth});
     }
 }
 } // namespace fantasy
