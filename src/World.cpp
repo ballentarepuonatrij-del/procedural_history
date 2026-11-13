@@ -159,9 +159,18 @@ int World::addPerson(int nation,int year,bool newborn) {
     Status status=(main==Species::Outlaw||cityOutlaw)?Status::Outlaw:Status::Free;
     if(cityOutlaw) profession=Profession::Thief;
     p.stages.push_back({born,nation,-1,profession,status});
+    p.wealth=newborn?0:randomInt(0,45);
+    if(profession==Profession::Noble) p.wealth+=90;
+    else if(profession==Profession::Merchant) p.wealth+=45;
     p.biography.push_back({born,L"Родился/родилась в землях «"+nations_[static_cast<size_t>(nation)].name+L"»."});
     if(cityOutlaw) p.biography.push_back({0,L"Вступил/вступила в преступную группировку, действующую в городах государства."});
     people_.push_back(std::move(p));
+    currentSpouses_.push_back(-1);
+    if(!newborn) {
+        const int familyId=static_cast<int>(families_.size());
+        families_.push_back({familyId,id,year,L"Дом «"+people_.back().name+L"» (#"+std::to_wstring(id)+L")"});
+        people_.back().family=familyId;
+    }
     initializeCharacter(id,year);
     if(newborn && people_.back().homeSettlement>=0 && chance(.055))
         addSettlementEvent(year,people_.back().homeSettlement,L"Родился новый житель: «"+people_.back().name+L"».");
@@ -224,6 +233,7 @@ void World::initialNations() {
         nationState_[static_cast<size_t>(id)].ruler=findRuler(id,0);
     }
     updateCensus();
+    seedFoundingFamilies();
 }
 int World::choosePerson(int nation,int minAge,int year) {
     if(alive_.empty()) return -1;
@@ -243,7 +253,7 @@ int World::choosePerson(int nation,int minAge,int year) {
     }
     return -1;
 }
-int World::findRuler(int nation,int year) {
+int World::findRuler(int nation,int year,int predecessor) {
     // Rulers are selected based on developed leadership skills, not purely at random.
     int winner=-1;
     int best=std::numeric_limits<int>::min();
@@ -257,6 +267,8 @@ int World::findRuler(int nation,int year) {
                   static_cast<int>(c.abilities[static_cast<size_t>(Ability::Willpower)])+
                   static_cast<int>(c.skills[static_cast<size_t>(Skill::Diplomacy)])+
                   static_cast<int>(c.traits[static_cast<size_t>(Personality::Ambition)]);
+        if(predecessor>=0 && nationState_[static_cast<size_t>(nation)].government==Government::Monarchy &&
+           isDescendantOf(id,predecessor)) score+=450; // Prefer eligible heirs to outsiders
         if(nations_[static_cast<size_t>(nation)].culture==Species::Outlaw)
             score+=static_cast<int>(c.skills[static_cast<size_t>(Skill::Combat)])+
                    static_cast<int>(c.skills[static_cast<size_t>(Skill::Stealth)]);
@@ -316,7 +328,7 @@ void World::generate(const Settings& requested) {
     settings_.width=std::clamp(settings_.width,40,160);
     settings_.height=std::clamp(settings_.height,30,100);
     rng_.seed(settings_.seed);
-    tiles_.clear(); owners_.clear(); nations_.clear(); nationState_.clear(); people_.clear(); alive_.clear(); settlements_.clear(); settlementState_.clear(); settlementEvents_.clear(); guilds_.clear(); events_.clear(); interactions_.clear(); timeline_.clear(); nextSettlementName_=0;
+    tiles_.clear(); owners_.clear(); nations_.clear(); nationState_.clear(); people_.clear(); alive_.clear(); settlements_.clear(); settlementState_.clear(); settlementEvents_.clear(); guilds_.clear(); events_.clear(); interactions_.clear(); families_.clear(); marriages_.clear(); inheritances_.clear(); currentSpouses_.clear(); timeline_.clear(); nextSettlementName_=0;
     createTerrain(); initialNations();
     for(const auto& module:modules_) module->onWorldCreated(*this);
     updateCensus(); capture(0);
