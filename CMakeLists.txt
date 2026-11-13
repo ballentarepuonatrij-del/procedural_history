@@ -11,6 +11,7 @@ add_library(FantasyCore STATIC
     src/Geography.cpp
     src/World.cpp
     src/CharacterDevelopment.cpp
+    src/Family.cpp
     src/Simulation.cpp
 )
 target_include_directories(FantasyCore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -23,7 +24,7 @@ endif()
 
 if(WIN32)
     add_executable(FantasyChronicle WIN32 src/Win32App.cpp)
-    target_link_libraries(FantasyChronicle PRIVATE FantasyCore comctl32 comdlg32 gdi32 user32)
+    target_link_libraries(FantasyChronicle PRIVATE FantasyCore comctl32 comdlg32 gdi32 user32 advapi32)
     target_compile_definitions(FantasyChronicle PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     if(MSVC)
         target_compile_options(FantasyChronicle PRIVATE /W4 /utf-8 /EHsc)
