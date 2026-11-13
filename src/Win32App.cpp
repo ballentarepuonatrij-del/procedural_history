@@ -26,6 +26,64 @@ using namespace fantasy;
 namespace {
 constexpr wchar_t MainClass[]=L"FantasyChronicleMainWindow";
 constexpr wchar_t DetailClass[]=L"FantasyChronicleDetailWindow";
+constexpr wchar_t PlacementKey[]=L"Software\FantasyChronicle";
+constexpr wchar_t PlacementName[]=L"MainWindowPlacement";
+struct WindowGeometry {
+    DWORD version{1};
+    LONG left{},top{},right{},bottom{};
+    DWORD maximized{};
+};
+struct InitialGeometry { RECT rect{}; bool maximized{}; };
+
+RECT workingAreaFor(const RECT* saved=nullptr) {
+    MONITORINFO info{};info.cbSize=sizeof(info);
+    HMONITOR monitor=saved?MonitorFromRect(saved,MONITOR_DEFAULTTONEAREST):
+        MonitorFromPoint(POINT{0,0},MONITOR_DEFAULTTOPRIMARY);
+    if(GetMonitorInfoW(monitor,&info)) return info.rcWork;
+    return RECT{0,0,GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN)};
+}
+InitialGeometry startupGeometry() {
+    const RECT work=workingAreaFor();
+    const int width=std::max(1,static_cast<int>(work.right-work.left)*4/5);
+    const int height=std::max(1,static_cast<int>(work.bottom-work.top)*4/5);
+    InitialGeometry result{{work.left+((work.right-work.left)-width)/2,
+        work.top+((work.bottom-work.top)-height)/2,0,0},false};
+    result.rect.right=result.rect.left+width;
+    result.rect.bottom=result.rect.top+height;
+    WindowGeometry saved{};
+    DWORD bytes=static_cast<DWORD>(sizeof(saved)),type=0;
+    if(RegGetValueW(HKEY_CURRENT_USER,PlacementKey,PlacementName,RRF_RT_REG_BINARY,
+                    &type,&saved,&bytes)!=ERROR_SUCCESS || bytes!=sizeof(saved) || saved.version!=1) return result;
+    RECT requested{saved.left,saved.top,saved.right,saved.bottom};
+    if(requested.right-requested.left<540 || requested.bottom-requested.top<360 ||
+       requested.right-requested.left>20000 || requested.bottom-requested.top>20000) return result;
+    const RECT target=workingAreaFor(&requested);
+    // Keep restored windows usable after changing the screen or monitor layout.
+    const int w=std::min(static_cast<int>(requested.right-requested.left),static_cast<int>(target.right-target.left));
+    const int h=std::min(static_cast<int>(requested.bottom-requested.top),static_cast<int>(target.bottom-target.top));
+    const int x=std::clamp(static_cast<int>(requested.left),static_cast<int>(target.left),static_cast<int>(target.right)-w);
+    const int y=std::clamp(static_cast<int>(requested.top),static_cast<int>(target.top),static_cast<int>(target.bottom)-h);
+    result.rect={x,y,x+w,y+h};
+    result.maximized=saved.maximized!=0;
+    return result;
+}
+void persistGeometry(HWND hwnd) {
+    if(!hwnd || IsIconic(hwnd)) return;
+    WINDOWPLACEMENT placement{};placement.length=sizeof(placement);
+    if(!GetWindowPlacement(hwnd,&placement)) return;
+    RECT rect=IsZoomed(hwnd)?placement.rcNormalPosition:RECT{};
+    if(!IsZoomed(hwnd) && !GetWindowRect(hwnd,&rect)) return;
+    WindowGeometry data{};
+    data.left=rect.left;data.top=rect.top;data.right=rect.right;data.bottom=rect.bottom;
+    data.maximized=IsZoomed(hwnd)?1u:0u;
+    HKEY key{};
+    if(RegCreateKeyExW(HKEY_CURRENT_USER,PlacementKey,0,nullptr,0,KEY_SET_VALUE,
+                       nullptr,&key,nullptr)==ERROR_SUCCESS) {
+        RegSetValueExW(key,PlacementName,0,REG_BINARY,
+                       reinterpret_cast<const BYTE*>(&data),static_cast<DWORD>(sizeof(data)));
+        RegCloseKey(key);
+    }
+}
 constexpr COLORREF Background=RGB(19,27,37);
 constexpr COLORREF Bright=RGB(238,241,244);
 constexpr COLORREF Muted=RGB(163,179,192);
@@ -175,10 +233,13 @@ int Application::run(int show) {
     detailClass.lpfnWndProc=detailProcedure;
     detailClass.lpszClassName=DetailClass;
     RegisterClassExW(&detailClass);
+    const auto geometry=startupGeometry();
+    const RECT& rect=geometry.rect;
     main_=CreateWindowExW(0,MainClass,L"Фэнтези: летопись мира",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,
-                          CW_USEDEFAULT,CW_USEDEFAULT,1380,850,nullptr,nullptr,instance_,this);
+                          rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,
+                          nullptr,nullptr,instance_,this);
     if(!main_) return 1;
-    ShowWindow(main_,show);UpdateWindow(main_);
+    ShowWindow(main_,geometry.maximized?SW_SHOWMAXIMIZED:show);UpdateWindow(main_);
     MSG message{};
     while(GetMessageW(&message,nullptr,0,0)>0) {
         TranslateMessage(&message);
@@ -297,6 +358,16 @@ void Application::layoutMain() {
         MoveWindow(runtimeControls_[5],exportX,bottom,157,36,TRUE);
         MoveWindow(runtimeControls_[6],exportX+163,bottom,140,36,TRUE);
     }
+    if(!started_ && setupControls_.size()==7) {
+        // Keep the start button visible on laptop displays with an 80%-height window.
+        const int top=std::clamp(static_cast<int>(rc.bottom)/3+40,210,250);
+        const int spacing=std::clamp((static_cast<int>(rc.bottom)-top-85)/3,66,90);
+        for(int i=0;i<3;++i) {
+            MoveWindow(setupControls_[static_cast<size_t>(i*2)],71,top+i*spacing,430,28,TRUE);
+            MoveWindow(setupControls_[static_cast<size_t>(i*2+1)],72,top+i*spacing+30,230,32,TRUE);
+        }
+        MoveWindow(setupControls_[6],72,top+spacing*3+2,235,43,TRUE);
+    }
     if(started_) {
         RECT map=mapBounds();
         camera_.setViewport({map.left,map.top,map.right,map.bottom});
@@ -342,7 +413,8 @@ void Application::paintSetup(HDC dc,const RECT& bounds) {
         L"Сказочный народец — тайные лесные общины"};
     for(int i=0;i<5;++i) textLine(dc,right,295+i*48,descriptions[i],Muted);
     SelectObject(dc,fontSmall_);
-    textLine(dc,71,std::max(615,static_cast<int>(bounds.bottom)-90),L"Модель хранит отдельные биографии и события. Численность населения намеренно ограничена для скорости симуляции.",Muted);
+    if(bounds.bottom>=680)
+        textLine(dc,71,static_cast<int>(bounds.bottom)-45,L"Модель хранит биографии и поколения. Население ограничено ради скорости симуляции.",Muted);
 }
 void Application::paintWorld(HDC dc,const RECT& viewport) {
     const Snapshot& snap=world_.at(year_);
@@ -567,8 +639,12 @@ void Application::updateDetails() {
         record+=L"ТЕРРИТОРИЯ: "+number(stats->territory)+L" клеток\r\n";
         record+=L"ПОСЕЛЕНИЙ: "+number(stats->settlements)+L"\r\n";
         record+=L"КАЗНА: "+number(stats->treasury)+L"  |  СТАБИЛЬНОСТЬ: "+number(stats->stability)+L"\r\n";
-        if(stats->ruler>=0 && static_cast<size_t>(stats->ruler)<world_.people().size())
-            record+=L"ПРАВИТЕЛЬ: "+world_.people()[static_cast<size_t>(stats->ruler)].name+L"\r\n";
+        if(stats->ruler>=0 && static_cast<size_t>(stats->ruler)<world_.people().size()) {
+            const auto& ruler=world_.people()[static_cast<size_t>(stats->ruler)];
+            record+=L"ПРАВИТЕЛЬ: "+ruler.name+L"\r\n";
+            if(ruler.family>=0) record+=L"РОД ПРАВИТЕЛЯ: "+
+                world_.families()[static_cast<size_t>(ruler.family)].name+L"\r\n";
+        }
         if(n.vanished>=0 && year_>=n.vanished) record+=L"СТАТУС: государство распалось в "+number(n.vanished)+L" г.\r\n";
         record+=L"\r\nПОСЕЛЕНИЯ\r\n";
         int listed=0;
@@ -692,6 +768,38 @@ void Application::updateBiography() {
     if(p.died<=year_) biography+=L"Смерть: "+yearLabel(p.died)+L"\r\n";
     biography+=L"Профессия: "+std::wstring(professionName(stage.profession))+L"\r\n";
     biography+=L"Положение: "+std::wstring(statusName(stage.status))+L"\r\n";
+    const auto& family=world_.families();
+    const auto& everyone=world_.people();
+    biography+=L"\r\nРОДОСЛОВНАЯ И СЕМЬЯ\r\n";
+    if(p.family>=0 && static_cast<size_t>(p.family)<family.size())
+        biography+=L"Род: "+family[static_cast<size_t>(p.family)].name+L"\r\n";
+    auto personName=[&](int id) { return id>=0 && static_cast<size_t>(id)<everyone.size()?
+        everyone[static_cast<size_t>(id)].name:std::wstring(L"неизвестно"); };
+    biography+=L"Родитель 1: "+personName(p.parentA)+L"\r\n";
+    biography+=L"Родитель 2: "+personName(p.parentB)+L"\r\n";
+    const int spouse=world_.spouseAt(p,relevantYear);
+    biography+=L"Супруг/супруга: "+(spouse>=0?personName(spouse):L"нет в выбранный год")+L"\r\n";
+    biography+=L"Имущество: "+number(world_.wealthAt(p,relevantYear))+L" монет\r\n";
+    biography+=L"\r\nПРЕДКИ (до трёх поколений)\r\n";
+    auto ancestors=[&](auto&& self,int id,int generation)->void {
+        if(id<0 || generation>3 || static_cast<size_t>(id)>=everyone.size()) return;
+        const auto& ancestor=everyone[static_cast<size_t>(id)];
+        biography+=std::wstring(static_cast<size_t>(generation)*2,L' ')+L"• "+ancestor.name+
+                   L" (рожд. "+number(ancestor.born)+L")\r\n";
+        self(self,ancestor.parentA,generation+1);
+        self(self,ancestor.parentB,generation+1);
+    };
+    ancestors(ancestors,p.parentA,1);
+    ancestors(ancestors,p.parentB,1);
+    if(p.parentA<0 && p.parentB<0) biography+=L"Сведения о старших поколениях не сохранились.\r\n";
+    biography+=L"\r\nДЕТИ\r\n";
+    int visibleChildren=0;
+    for(int child:p.children) if(everyone[static_cast<size_t>(child)].born<=year_) {
+        const auto& descendant=everyone[static_cast<size_t>(child)];
+        biography+=L"• "+descendant.name+L" ("+number(descendant.born)+L" г.)\r\n";
+        ++visibleChildren;
+    }
+    if(!visibleChildren) biography+=L"Нет записей на выбранный год.\r\n";
     if(stage.guild>=0 && static_cast<size_t>(stage.guild)<world_.guilds().size()) biography+=L"Объединение: "+world_.guilds()[static_cast<size_t>(stage.guild)].name+L"\r\n";
     if(p.homeSettlement>=0 && static_cast<size_t>(p.homeSettlement)<world_.settlements().size()) biography+=L"Родное поселение: "+world_.settlements()[static_cast<size_t>(p.homeSettlement)].name+L"\r\n";
     // Show the character exactly as they were in the selected year, not at
@@ -752,11 +860,27 @@ void Application::exportChronicle() {
         for(const auto& event:world_.settlementEvents()) if(event.settlement==town.id)
             output(L"  ["+number(event.year)+L"] "+event.text+L"\r\n");
     }
+    output(L"\r\n=== РОДЫ И ДИНАСТИИ ===\r\n");
+    for(const auto& family:world_.families())
+        output(L"#"+number(family.id)+L" "+family.name+L" | основатель: "+
+               world_.people()[static_cast<size_t>(family.founder)].name+L"\r\n");
+    output(L"\r\n=== БРАКИ И НАСЛЕДСТВА ===\r\n");
+    for(const auto& marriage:world_.marriages())
+        output(L"["+number(marriage.year)+L"] Брак: "+world_.people()[static_cast<size_t>(marriage.first)].name+
+               L" и "+world_.people()[static_cast<size_t>(marriage.second)].name+L"\r\n");
+    for(const auto& inheritance:world_.inheritances())
+        output(L"["+number(inheritance.year)+L"] Наследство: "+
+               world_.people()[static_cast<size_t>(inheritance.from)].name+L" → "+
+               world_.people()[static_cast<size_t>(inheritance.to)].name+L" ("+number(inheritance.wealth)+L" монет)\r\n");
     output(L"\r\n=== ИМЕННЫЕ ЖИТЕЛИ И БИОГРАФИИ ===\r\n");
     for(const auto& p:world_.people()) {
         output(L"\r\n#"+number(p.id)+L" "+p.name+L" ("+speciesName(p.species)+L", "+number(p.born)+L"–"+
                (p.died==std::numeric_limits<int>::max()?L"жив":number(p.died))+L")\r\n");
         const auto& stats=world_.statsAt(p,p.died==std::numeric_limits<int>::max()?world_.settings().years:p.died-1);
+        output(L"  Род: "+(p.family>=0?world_.families()[static_cast<size_t>(p.family)].name:L"неизвестен")+
+               L" | родители: "+(p.parentA>=0?world_.people()[static_cast<size_t>(p.parentA)].name:L"неизвестен")+
+               L", "+(p.parentB>=0?world_.people()[static_cast<size_t>(p.parentB)].name:L"неизвестен")+L"\r\n");
+        output(L"  Имущество на последнем прожитом году: "+number(world_.wealthAt(p,world_.settings().years))+L" монет\r\n");
         output(L"  Итоговые способности (0–100): ");
         for(size_t i=0;i<static_cast<size_t>(Ability::Count);++i)
             output(std::wstring(abilityName(static_cast<Ability>(i)))+L"="+number(stats.abilities[i])+L"; ");
@@ -778,10 +902,14 @@ LRESULT Application::dispatchMain(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
     case WM_CREATE: onMainCreate();return 0;
     case WM_GETMINMAXINFO: {
         auto* info=reinterpret_cast<MINMAXINFO*>(l);
-        info->ptMinTrackSize.x=1050;info->ptMinTrackSize.y=680;
+        const RECT work=workingAreaFor();
+        info->ptMinTrackSize.x=std::min(1050,static_cast<int>(work.right-work.left)*4/5);
+        info->ptMinTrackSize.y=std::min(680,static_cast<int>(work.bottom-work.top)*4/5);
         return 0;
     }
     case WM_SIZE: layoutMain();return 0;
+    case WM_EXITSIZEMOVE: persistGeometry(hwnd);return 0;
+    case WM_CLOSE: persistGeometry(hwnd);DestroyWindow(hwnd);return 0;
     case WM_ERASEBKGND: return 1;
     case WM_CTLCOLORSTATIC:
         SetTextColor(reinterpret_cast<HDC>(w),Bright);
