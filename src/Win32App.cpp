@@ -15,12 +15,15 @@
 #include <cstdlib>
 #include "Fantasy/World.h"
 #include "Fantasy/MapCamera.h"
+#include "Fantasy/LabelLayout.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
+#include <unordered_set>
+#include <utility>
 
 using namespace fantasy;
 namespace {
@@ -139,18 +142,28 @@ COLORREF factionColor(SubfactionKind type) {
     }
     return RGB(220,220,220);
 }
+// Candidates are collected for ALL wrapped map copies before any text is drawn.
+// This prevents a later map copy from painting over text placed by an earlier one.
+enum class MapLabelKind { Nation, Region, Province, Settlement, Subfaction };
+struct MapLabel {
+    int x{},y{},priority{},id{};
+    MapLabelKind kind{};
+    bool centered{};
+    std::wstring text;
+};
 struct FactionMarker { int faction{},province{},x{},y{}; };
 std::vector<FactionMarker> factionMarkers(const World& world,const MapCamera& camera,const Snapshot& snap) {
     std::vector<FactionMarker> markers;
     const MapRect base=camera.drawnRect();
     const int w=world.settings().width,h=world.settings().height;
-    for(int copy=-1;copy<=1;++copy) {
-        const int left=base.left+copy*(base.right-base.left);
-        for(size_t i=0;i<snap.subfactionPresences.size();++i) {
-            const auto& presence=snap.subfactionPresences[i];
-            const auto& province=world.provinces()[static_cast<size_t>(presence.province)];
-            int overlap=0;
-            for(size_t k=0;k<i;++k)if(snap.subfactionPresences[k].province==presence.province)++overlap;
+    // Count duplicates once, rather than rescanning all presences for every dot.
+    std::vector<int> inProvince(world.provinces().size(),0);
+    for(size_t i=0;i<snap.subfactionPresences.size();++i) {
+        const auto& presence=snap.subfactionPresences[i];
+        const auto& province=world.provinces()[static_cast<size_t>(presence.province)];
+        const int overlap=inProvince[static_cast<size_t>(presence.province)]++;
+        for(int copy=-1;copy<=1;++copy) {
+            const int left=base.left+copy*(base.right-base.left);
             int x=left+int(std::lround((province.center.x+.5)*double(base.right-base.left)/w));
             int y=base.top+int(std::lround((province.center.y+.5)*double(base.bottom-base.top)/h));
             x+=(overlap%3-1)*14;
@@ -481,6 +494,14 @@ void Application::paintWorld(HDC dc,const RECT& viewport) {
     const MapRect base=camera_.drawnRect();
     const int saved=SaveDC(dc);
     IntersectClipRect(dc,viewport.left,viewport.top,viewport.right,viewport.bottom);
+    std::vector<MapLabel> labels;
+    std::vector<LabelRect> markerBoxes;
+    const auto factionPoints=mapLayer_==MapLayer::Subfactions?
+        factionMarkers(world_,camera_,snap):std::vector<FactionMarker>{};
+    const auto visible=[&](int x,int y,int padding=0) {
+        return x>=viewport.left-padding && x<viewport.right+padding &&
+               y>=viewport.top-padding && y<viewport.bottom+padding;
+    };
     std::vector<uint32_t> pixels(static_cast<size_t>(w*h));
     std::vector<Rgb> factionTints(world_.provinces().size(),Rgb{128,128,128});
     std::vector<int> factionStrength(world_.provinces().size(),0);
@@ -590,44 +611,44 @@ void Application::paintWorld(HDC dc,const RECT& viewport) {
             int radius=(city?6:4)+(camera_.zoom()>2.0?1:0);
             SelectObject(dc,place.id==selectedSettlement_?chosen:white);
             Ellipse(dc,x-radius,y-radius,x+radius+1,y+radius+1);
+            if(visible(x,y,radius))
+                markerBoxes.push_back({x-radius-2,y-radius-2,x+radius+3,y+radius+3});
         }
         SelectObject(dc,oldPen);SelectObject(dc,oldBrush);
         DeleteObject(white);DeleteObject(chosen);
-        SelectObject(dc,fontSmall_);SetBkMode(dc,TRANSPARENT);
+        // Collect text for one global collision pass; rendering happens AFTER
+        // all copies, borders, settlement dots and subfaction symbols.
         if(mapLayer_==MapLayer::Politics) {
             for(const Nation& nation:world_.nations()) {
                 if(nation.founded>year_ || (nation.vanished>=0&&year_>=nation.vanished))continue;
                 if(snap.owner[static_cast<size_t>(world_.index(nation.capital.x,nation.capital.y))]!=nation.id)continue;
-                int x=rect.left+int(std::lround((nation.capital.x+.5)*sx))+8;
-                int y=rect.top+int(std::lround((nation.capital.y+.5)*sy))-9;
-                std::wstring label=nation.name;
-                if(label.size()>19)label=label.substr(0,18)+L"…";
-                textLine(dc,x+1,y+1,label,RGB(9,16,22));textLine(dc,x,y,label,RGB(255,247,219));
+                int x=rect.left+int(std::lround((nation.capital.x+.5)*sx));
+                int y=rect.top+int(std::lround((nation.capital.y+.5)*sy));
+                if(!visible(x,y,40))continue;
+                std::wstring name=nation.name;
+                if(name.size()>19)name=name.substr(0,18)+L"…";
+                labels.push_back({x,y,70,nation.id,MapLabelKind::Nation,false,std::move(name)});
             }
         } else if(mapLayer_==MapLayer::Regions) {
             for(const Region& region:world_.regions()) {
                 int x=rect.left+int(std::lround((region.center.x+.5)*sx));
                 int y=rect.top+int(std::lround((region.center.y+.5)*sy));
-                if(x<viewport.left||x>viewport.right-40||y<viewport.top||y>viewport.bottom-15)continue;
-                textLine(dc,x+1,y+1,region.name,RGB(11,19,20));
-                textLine(dc,x,y,region.name,RGB(250,239,211));
+                if(visible(x,y,30)) labels.push_back({x,y,55,region.id,MapLabelKind::Region,true,region.name});
             }
-        } else if(camera_.zoom()>=1.65) {
+        } else if(mapLayer_==MapLayer::Provinces && camera_.zoom()>=1.65) {
+            // Crucial: province names must NEVER be rendered in Subfactions mode.
             for(const Province& province:world_.provinces()) {
                 int x=rect.left+int(std::lround((province.center.x+.5)*sx));
                 int y=rect.top+int(std::lround((province.center.y+.5)*sy));
-                if(x<viewport.left||x>viewport.right-20||y<viewport.top||y>viewport.bottom-15)continue;
-                textLine(dc,x+1,y+1,province.name,RGB(10,19,24));
-                textLine(dc,x,y,province.name,RGB(255,247,220));
+                if(visible(x,y,30)) labels.push_back({x,y,35,province.id,MapLabelKind::Province,true,province.name});
             }
         }
         if(mapLayer_==MapLayer::Subfactions) {
-            // Each active presence gets its own marker; overlapping factions never overwrite one another.
-            const auto markers=factionMarkers(world_,camera_,snap);
-            for(const auto& marker:markers) {
+            // Every network presence has its own clickable symbol, but not its
+            // own large text label. Names are deduplicated after placement.
+            for(const auto& marker:factionPoints) {
                 if(marker.x<rect.left || marker.x>=rect.right || marker.y<rect.top || marker.y>=rect.bottom)continue;
-                if(marker.x<viewport.left-10 || marker.x>viewport.right+10 ||
-                   marker.y<viewport.top-10 || marker.y>viewport.bottom+10)continue;
+                if(!visible(marker.x,marker.y,10))continue;
                 const auto kind=world_.subfactions()[static_cast<size_t>(marker.faction)].kind;
                 HPEN outline=CreatePen(PS_SOLID,2,marker.faction==selectedSubfaction_?RGB(255,255,255):RGB(24,31,40));
                 HBRUSH fill=CreateSolidBrush(factionColor(kind));
@@ -635,23 +656,55 @@ void Application::paintWorld(HDC dc,const RECT& viewport) {
                 Ellipse(dc,marker.x-7,marker.y-7,marker.x+8,marker.y+8);
                 SelectObject(dc,originalBrush);SelectObject(dc,originalPen);
                 DeleteObject(fill);DeleteObject(outline);
+                markerBoxes.push_back({marker.x-9,marker.y-9,marker.x+10,marker.y+10});
                 if(camera_.zoom()>=2.0) {
                     const auto& name=world_.subfactions()[static_cast<size_t>(marker.faction)].name;
                     std::wstring label=name.size()>22?name.substr(0,21)+L"…":name;
-                    textLine(dc,marker.x+10,marker.y-8,label,RGB(253,245,218));
+                    const int priority=marker.faction==selectedSubfaction_?110:80;
+                    labels.push_back({marker.x,marker.y,priority,marker.faction,
+                                      MapLabelKind::Subfaction,false,std::move(label)});
                 }
             }
         }
-        if(camera_.zoom()>=2.0 && mapLayer_!=MapLayer::Provinces && mapLayer_!=MapLayer::Subfactions) {
+        if(camera_.zoom()>=2.25 && (mapLayer_==MapLayer::Politics || mapLayer_==MapLayer::Regions ||
+                                     (mapLayer_==MapLayer::Subfactions && camera_.zoom()>=4.0))) {
             for(const Settlement& place:world_.settlements()) {
                 if(place.founded>year_)continue;
-                int x=rect.left+int(std::lround((place.position.x+.5)*sx))+8;
-                int y=rect.top+int(std::lround((place.position.y+.5)*sy))+6;
-                if(x<viewport.left||x>viewport.right-25||y<viewport.top||y>viewport.bottom-16)continue;
-                std::wstring title=place.name;if(title.size()>23)title=title.substr(0,22)+L"…";
-                textLine(dc,x+1,y+1,title,RGB(10,20,26));textLine(dc,x,y,title,RGB(255,247,220));
+                int x=rect.left+int(std::lround((place.position.x+.5)*sx));
+                int y=rect.top+int(std::lround((place.position.y+.5)*sy));
+                if(!visible(x,y,30))continue;
+                std::wstring title=place.name;
+                if(title.size()>23)title=title.substr(0,22)+L"…";
+                const int priority=place.id==selectedSettlement_?105:25;
+                labels.push_back({x,y,priority,place.id,MapLabelKind::Settlement,false,std::move(title)});
             }
         }
+    }
+    // One collision pass across the entire visible map, including both sides
+    // of the date line. Prioritize faction names and state names over cities.
+    SelectObject(dc,fontSmall_);
+    SetBkMode(dc,TRANSPARENT);
+    LabelLayout layout({viewport.left,viewport.top,viewport.right,viewport.bottom},4);
+    for(const auto& rect:markerBoxes)layout.reserveSymbol(rect);
+    std::stable_sort(labels.begin(),labels.end(),[](const MapLabel& a,const MapLabel& b) {
+        if(a.priority!=b.priority)return a.priority>b.priority;
+        if(a.id!=b.id)return a.id<b.id;
+        return static_cast<int>(a.kind)<static_cast<int>(b.kind);
+    });
+    std::unordered_set<int> labeledFactions;
+    for(const auto& label:labels) {
+        if(label.kind==MapLabelKind::Subfaction && labeledFactions.count(label.id))continue;
+        if(label.text.empty())continue;
+        SIZE extent{};
+        if(!GetTextExtentPoint32W(dc,label.text.c_str(),static_cast<int>(label.text.size()),&extent))continue;
+        const auto box=layout.place(label.x,label.y,extent.cx+2,extent.cy+2,label.centered);
+        if(!box)continue;
+        const int px=box->left,py=box->top;
+        const COLORREF shade=RGB(10,19,24);
+        const COLORREF ink=label.kind==MapLabelKind::Subfaction?RGB(253,245,218):RGB(255,247,220);
+        textLine(dc,px+1,py+1,label.text,shade);
+        textLine(dc,px,py,label.text,ink);
+        if(label.kind==MapLabelKind::Subfaction)labeledFactions.insert(label.id);
     }
     RestoreDC(dc,saved);
     HPEN frame=CreatePen(PS_SOLID,1,RGB(109,137,154));
