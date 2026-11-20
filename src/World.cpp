@@ -23,7 +23,9 @@ bool World::claimTile(int nation,int x,int y,int year) {
     if(!inside(x,y) || nation<0 || static_cast<size_t>(nation)>=nations_.size() || nations_[static_cast<size_t>(nation)].founded>year) return false;
     int idx=index(x,y);
     if(tiles_[static_cast<size_t>(idx)].terrain==Terrain::Sea) return false;
-    owners_[static_cast<size_t>(idx)]=static_cast<int16_t>(nation);
+    int province=tileProvinces_[static_cast<size_t>(idx)];
+    if(province<0) return false;
+    setProvinceOwner(province,nation); // Conquest is province-wide.
     return true;
 }
 bool World::addPersonNote(int person,int year,const std::wstring& text) {
@@ -123,7 +125,7 @@ int World::createNation(Species species,Point capital,int year) {
     state.treasury=randomInt(90,220);
     state.military=randomInt(17,52);
     nationState_.push_back(state);
-    owners_[static_cast<size_t>(index(capital.x,capital.y))]=static_cast<int16_t>(id);
+    setProvinceOwner(provinceAt(capital.x,capital.y),id);
     addSettlement(id,year,capital,true);
     addEvent(year,id,L"Основано объединение «"+n.name+L"» ("+speciesName(species)+L").");
     return id;
@@ -217,14 +219,14 @@ void World::initialNations() {
         Species species=sequence[static_cast<size_t>(i)%10];
         Point capital=chooseCapital(species);
         int id=createNation(species,capital,0);
-        // Небольшое первоначальное владение; дальнейшие границы изменяются по годам.
-        const int radius=species==Species::Folk?2:3;
+        // Founding claims nearby WHOLE provinces; immutable provincial boundaries.
+        const int radius=species==Species::Folk?3:5;
         for(int dy=-radius;dy<=radius;++dy) for(int dx=-radius;dx<=radius;++dx) {
-            int x=capital.x+dx,y=capital.y+dy;
+            int x=wrapX(capital.x+dx),y=capital.y+dy;
             if(!inside(x,y) || dx*dx+dy*dy>radius*radius) continue;
-            int ii=index(x,y);
-            if(tiles_[static_cast<size_t>(ii)].terrain!=Terrain::Sea && owners_[static_cast<size_t>(ii)]==-1)
-                owners_[static_cast<size_t>(ii)]=static_cast<int16_t>(id);
+            int pid=provinceAt(x,y);
+            if(pid>=0 && owners_[static_cast<size_t>(index(x,y))]==-1)
+                setProvinceOwner(pid,id);
         }
         int pop=species==Species::Folk?35:species==Species::Outlaw?45:randomInt(55,78);
         startPeople(id,pop,0,false);
@@ -318,8 +320,31 @@ void World::capture(int year) {
         auto& state=settlementState_[static_cast<size_t>(home)];
         if(state.owner>=0 && person.stages.back().nation==state.owner) ++state.knownResidents;
     }
+    // Record province ownership separately: the same province exists in every era.
+    for(Province& province:provinces_) {
+        ProvinceYear& state=provinceState_[static_cast<size_t>(province.id)];
+        const int current=owners_[static_cast<size_t>(province.cells.front())];
+        if(current!=state.owner) {
+            std::wstring text=L"Провинция «"+province.name+L"» ";
+            if(current<0) text+=L"осталась без государственной власти.";
+            else if(state.owner<0) text+=L"перешла под власть «"+nations_[static_cast<size_t>(current)].name+L"».";
+            else text+=L"перешла от «"+nations_[static_cast<size_t>(state.owner)].name+
+                           L"» к «"+nations_[static_cast<size_t>(current)].name+L"».";
+            provinceEvents_.push_back({year,province.id,state.owner,current,text});
+            state.owner=current;
+            if(year>0) { state.unrest=std::min(100,state.unrest+25);state.development=std::max(0,state.development-3); }
+        } else if(year>0) {
+            state.unrest=std::max(0,state.unrest-2);
+            if(current>=0 && year%7==province.id%7) state.development=std::min(100,state.development+1);
+        }
+        state.settlements=0;
+    }
+    for(const Settlement& town:settlements_) if(town.founded<=year) {
+        int pid=provinceAt(town.position.x,town.position.y);
+        if(pid>=0) ++provinceState_[static_cast<size_t>(pid)].settlements;
+    }
     recordCharacterProgress(year);
-    timeline_.push_back({year,owners_,nationState_,settlementState_});
+    timeline_.push_back({year,owners_,nationState_,settlementState_,provinceState_});
 }
 void World::generate(const Settings& requested) {
     settings_=requested;
@@ -328,8 +353,8 @@ void World::generate(const Settings& requested) {
     settings_.width=std::clamp(settings_.width,40,160);
     settings_.height=std::clamp(settings_.height,30,100);
     rng_.seed(settings_.seed);
-    tiles_.clear(); owners_.clear(); nations_.clear(); nationState_.clear(); people_.clear(); alive_.clear(); settlements_.clear(); settlementState_.clear(); settlementEvents_.clear(); guilds_.clear(); events_.clear(); interactions_.clear(); families_.clear(); marriages_.clear(); inheritances_.clear(); currentSpouses_.clear(); timeline_.clear(); nextSettlementName_=0;
-    createTerrain(); initialNations();
+    tiles_.clear(); owners_.clear(); continents_.clear(); regions_.clear(); provinces_.clear(); tileProvinces_.clear(); provinceState_.clear(); provinceEvents_.clear(); nations_.clear(); nationState_.clear(); people_.clear(); alive_.clear(); settlements_.clear(); settlementState_.clear(); settlementEvents_.clear(); guilds_.clear(); events_.clear(); interactions_.clear(); families_.clear(); marriages_.clear(); inheritances_.clear(); currentSpouses_.clear(); timeline_.clear(); nextSettlementName_=0;
+    createTerrain(); createRegions(); initialNations();
     for(const auto& module:modules_) module->onWorldCreated(*this);
     updateCensus(); capture(0);
     for(int year=1;year<=settings_.years;++year) {
