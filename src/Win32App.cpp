@@ -997,7 +997,8 @@ void Application::populatePeopleList(bool settlementMode,int id) {
     updateBiography();
 }
 
-void Application::updateBiography() {    if(!detailsBio_) return;
+void Application::updateBiography() {
+    if(!detailsBio_) return;
     if(selectedPerson_<0 || static_cast<size_t>(selectedPerson_)>=world_.people().size()) {
         SetWindowTextW(detailsBio_,L"Здесь появится личная история выбранного жителя.");return;
     }
