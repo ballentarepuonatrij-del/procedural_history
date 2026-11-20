@@ -11,7 +11,7 @@
 namespace fantasy {
 
 enum class Species { Human, Elf, Dwarf, Outlaw, Folk };
-enum class Terrain { Sea, Plain, Forest, Jungle, Mountain };
+enum class Terrain { Sea, Plain, Forest, Jungle, Mountain, Desert, Tundra, Ice };
 enum class Government { Republic, Monarchy, Theocracy, CityState, Commune, Clan, PirateCouncil };
 enum class Profession { Farmer, Artisan, Merchant, Soldier, Miner, Sailor, Scholar, Priest, Noble, Thief, Healer };
 enum class Status { Free, Enslaved, Outlaw };
@@ -20,7 +20,15 @@ enum class SettlementKind { City, Village, Castle, Grove, MountainCity, Hideout,
 struct Rgb { uint8_t r{}, g{}, b{}; };
 struct Point { int x{}, y{}; };
 struct Tile { Terrain terrain{Terrain::Sea}; uint8_t height{}; };
-struct Settings { int civilizations{10}; int years{200}; uint32_t seed{42}; int width{88}; int height{52}; };
+struct Settings { int civilizations{10}; int years{200}; uint32_t seed{42}; int width{120}; int height{60}; };
+// The world is one entire spherical planet. The rectangular map is a longitude/latitude
+// projection; its western and eastern edges meet. The poles do not wrap vertically.
+struct Planet { std::wstring name{L"Эйтар"}; double radiusKm{6200.0}; double axialTiltDeg{23.5}; };
+struct Continent { int id{}, landTiles{}, regionCount{}; std::wstring name; Point center{}; };
+struct Region { int id{}, continent{}, landTiles{}; std::wstring name; Point center{}; std::vector<int> provinces; };
+struct Province { int id{}, continent{}, region{-1}, landTiles{}; std::wstring name; Point center{}; Terrain terrain{Terrain::Plain}; std::vector<int> cells; };
+struct ProvinceYear { int owner{-1}, settlements{}, development{40}, unrest{}; };
+struct ProvinceEvent { int year{}, province{}, previousOwner{-1}, newOwner{-1}; std::wstring text; };
 struct Nation {
     int id{};
     std::wstring name;
@@ -46,6 +54,7 @@ struct Snapshot {
     std::vector<int16_t> owner; // -1 = ничейная территория / море
     std::vector<NationYear> nationStates;
     std::vector<SettlementYear> settlementStates;
+    std::vector<ProvinceYear> provinceStates;
 };
 struct PersonStage {
     int year{}, nation{-1}, guild{-1};
@@ -150,6 +159,18 @@ public:
     const std::vector<NationYear>& liveStates() const { return nationState_; }
     void generate(const Settings& settings);
     const Settings& settings() const { return settings_; }
+    const Planet& planet() const { return planet_; }
+    const std::vector<Continent>& continents() const { return continents_; }
+    const std::vector<Region>& regions() const { return regions_; }
+    const std::vector<Province>& provinces() const { return provinces_; }
+    const std::vector<ProvinceEvent>& provinceEvents() const { return provinceEvents_; }
+    const std::vector<int16_t>& tileProvinces() const { return tileProvinces_; }
+    int provinceAt(int x,int y) const { return inside(x,y)?tileProvinces_[static_cast<size_t>(index(x,y))]:-1; }
+    // One longitude period spans width tiles, from -180 to +180 degrees.
+    int wrapX(int x) const { const int w=settings_.width; return (x%w+w)%w; }
+    double longitudeAt(double x) const { return x*360.0/settings_.width-180.0; }
+    double latitudeAt(double y) const { return 90.0-y*180.0/settings_.height; }
+    int provinceOwnerAt(const Snapshot& snapshot,int provinceId) const;
     const std::vector<Tile>& tiles() const { return tiles_; }
     const std::vector<Nation>& nations() const { return nations_; }
     const std::vector<Person>& people() const { return people_; }
@@ -175,6 +196,13 @@ public:
 
 private:
     Settings settings_{};
+    Planet planet_{};
+    std::vector<Continent> continents_;
+    std::vector<Region> regions_;
+    std::vector<Province> provinces_;
+    std::vector<int16_t> tileProvinces_;  // -1 for water
+    std::vector<ProvinceYear> provinceState_;
+    std::vector<ProvinceEvent> provinceEvents_;
     std::mt19937 rng_{};
     std::vector<Tile> tiles_;
     std::vector<int16_t> owners_;
@@ -199,6 +227,8 @@ private:
     int randomInt(int min, int max);
     bool chance(double probability);
     void createTerrain();
+    void createRegions();
+    void setProvinceOwner(int province,int nation);
     void initialNations();
     int createNation(Species species, Point capital, int year);
     Point chooseCapital(Species species);
