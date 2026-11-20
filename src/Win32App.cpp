@@ -155,6 +155,7 @@ class Application {
 public:
     explicit Application(HINSTANCE instance):instance_(instance) {}
     ~Application() {
+        releaseBackBuffer();
         if(font_) DeleteObject(font_);
         if(fontSmall_) DeleteObject(fontSmall_);
         if(fontTitle_) DeleteObject(fontTitle_);
@@ -169,6 +170,12 @@ private:
     HWND detailsTitle_{},detailsHistory_{},detailsPeople_{},detailsBio_{},detailsShowDead_{},layerButton_{};
     HFONT font_{},fontSmall_{},fontTitle_{};
     HBRUSH backgroundBrush_{};
+    // A persistent memory DC prevents users from seeing partially drawn frames.
+    // The bitmap is recreated only when the main client area changes size.
+    HDC backDC_{};
+    HBITMAP backBitmap_{};
+    HGDIOBJ backOriginalBitmap_{};
+    int backWidth_{},backHeight_{};
     std::vector<HWND> setupControls_,runtimeControls_;
     World world_;
     MapCamera camera_;
@@ -194,6 +201,8 @@ private:
     void layoutMain();
     RECT mapBounds() const;
     void paintMain(HDC);
+    bool ensureBackBuffer(HDC target,int width,int height);
+    void releaseBackBuffer();
     void paintSetup(HDC,const RECT&);
     void paintWorld(HDC,const RECT&);
     void paintLegend(HDC,const RECT&);
@@ -619,6 +628,43 @@ void Application::paintLegend(HDC dc,const RECT& map) {
     SelectObject(dc,fontSmall_);
     textLine(dc,24,window.bottom-119,hint_,Muted);
 }
+void Application::releaseBackBuffer() {
+    if(backDC_) {
+        if(backBitmap_) {
+            SelectObject(backDC_,backOriginalBitmap_);
+            DeleteObject(backBitmap_);
+        }
+        DeleteDC(backDC_);
+    }
+    backDC_=nullptr;
+    backBitmap_=nullptr;
+    backOriginalBitmap_=nullptr;
+    backWidth_=backHeight_=0;
+}
+
+bool Application::ensureBackBuffer(HDC target,int width,int height) {
+    if(width<=0||height<=0) return false;
+    if(backDC_ && backBitmap_ && width==backWidth_ && height==backHeight_) return true;
+
+    if(!backDC_) backDC_=CreateCompatibleDC(target);
+    if(!backDC_) return false;
+
+    // Allocate first: a failed resize must not destroy the previous bitmap.
+    HBITMAP next=CreateCompatibleBitmap(target,width,height);
+    if(!next) return false;
+    HGDIOBJ previous=SelectObject(backDC_,next);
+    if(!previous || previous==HGDI_ERROR) {
+        DeleteObject(next);
+        return false;
+    }
+    if(backBitmap_) DeleteObject(backBitmap_);
+    else backOriginalBitmap_=previous;
+    backBitmap_=next;
+    backWidth_=width;
+    backHeight_=height;
+    return true;
+}
+
 void Application::paintMain(HDC dc) {
     RECT rc{};GetClientRect(main_,&rc);
     FillRect(dc,&rc,backgroundBrush_);
@@ -951,8 +997,7 @@ void Application::populatePeopleList(bool settlementMode,int id) {
     updateBiography();
 }
 
-void Application::updateBiography() {
-    if(!detailsBio_) return;
+void Application::updateBiography() {    if(!detailsBio_) return;
     if(selectedPerson_<0 || static_cast<size_t>(selectedPerson_)>=world_.people().size()) {
         SetWindowTextW(detailsBio_,L"Здесь появится личная история выбранного жителя.");return;
     }
@@ -1123,7 +1168,29 @@ LRESULT Application::dispatchMain(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
         SetTextColor(reinterpret_cast<HDC>(w),Bright);
         SetBkMode(reinterpret_cast<HDC>(w),TRANSPARENT);
         return reinterpret_cast<LRESULT>(backgroundBrush_);
-    case WM_PAINT: { PAINTSTRUCT ps{};HDC dc=BeginPaint(hwnd,&ps);paintMain(dc);EndPaint(hwnd,&ps);return 0; }
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc=BeginPaint(hwnd,&ps);
+        if(!dc) return 0;
+        RECT client{};
+        GetClientRect(hwnd,&client);
+        if(ensureBackBuffer(dc,client.right-client.left,client.bottom-client.top)) {
+            // Rebuild the complete frame offscreen.  One BitBlt publishes it,
+            // so dragging never reveals the background-clear/map-draw stages.
+            const int saved=SaveDC(backDC_);
+            paintMain(backDC_);
+            if(saved) RestoreDC(backDC_,saved);
+            const RECT& dirty=ps.rcPaint;
+            if(dirty.right>dirty.left && dirty.bottom>dirty.top)
+                BitBlt(dc,dirty.left,dirty.top,dirty.right-dirty.left,dirty.bottom-dirty.top,
+                       backDC_,dirty.left,dirty.top,SRCCOPY);
+        } else {
+            // Rendering still works if GDI cannot allocate a backing bitmap.
+            paintMain(dc);
+        }
+        EndPaint(hwnd,&ps);
+        return 0;
+    }
     case WM_LBUTTONDOWN:
         if(started_) {
             RECT viewport=mapBounds();
@@ -1142,7 +1209,8 @@ LRESULT Application::dispatchMain(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
                 mapDragged_=true;
             if(mapDragged_) {
                 camera_.panPixels(x-dragLastX_,y-dragLastY_);
-                InvalidateRect(hwnd,nullptr,FALSE);
+                // Dragging changes only the map; avoid repainting controls and legend.
+                InvalidateRect(hwnd,&viewport,FALSE);
             }
             dragLastX_=x;dragLastY_=y;
             return 0;
