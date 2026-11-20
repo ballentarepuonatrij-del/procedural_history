@@ -14,6 +14,7 @@ add_library(FantasyCore STATIC
     src/CharacterDevelopment.cpp
     src/Family.cpp
     src/Simulation.cpp
+    src/Subfactions.cpp
 )
 target_include_directories(FantasyCore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(FantasyCore PUBLIC cxx_std_20)
