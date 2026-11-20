@@ -213,10 +213,11 @@ void World::addGuild(int nation,int year) {
     }
 }
 void World::initialNations() {
-    const Species sequence[]{Species::Human,Species::Elf,Species::Dwarf,Species::Outlaw,Species::Folk,
+    // Outlaws and the hidden folk are not states: they are seeded as province-based subfactions.
+    const Species sequence[]{Species::Human,Species::Elf,Species::Dwarf,
                              Species::Human,Species::Human,Species::Elf,Species::Dwarf,Species::Human};
     for(int i=0;i<settings_.civilizations;++i) {
-        Species species=sequence[static_cast<size_t>(i)%10];
+        Species species=sequence[static_cast<size_t>(i)%8];
         Point capital=chooseCapital(species);
         int id=createNation(species,capital,0);
         // Founding claims nearby WHOLE provinces; immutable provincial boundaries.
@@ -228,7 +229,7 @@ void World::initialNations() {
             if(pid>=0 && owners_[static_cast<size_t>(index(x,y))]==-1)
                 setProvinceOwner(pid,id);
         }
-        int pop=species==Species::Folk?35:species==Species::Outlaw?45:randomInt(55,78);
+        int pop=randomInt(55,78);
         startPeople(id,pop,0,false);
         addGuild(id,0);
         if(species==Species::Human || species==Species::Dwarf) addGuild(id,0);
@@ -344,7 +345,7 @@ void World::capture(int year) {
         if(pid>=0) ++provinceState_[static_cast<size_t>(pid)].settlements;
     }
     recordCharacterProgress(year);
-    timeline_.push_back({year,owners_,nationState_,settlementState_,provinceState_});
+    timeline_.push_back({year,owners_,nationState_,settlementState_,provinceState_,subfactionState_,subfactionPresences_});
 }
 void World::generate(const Settings& requested) {
     settings_=requested;
@@ -353,8 +354,8 @@ void World::generate(const Settings& requested) {
     settings_.width=std::clamp(settings_.width,40,160);
     settings_.height=std::clamp(settings_.height,30,100);
     rng_.seed(settings_.seed);
-    tiles_.clear(); owners_.clear(); continents_.clear(); regions_.clear(); provinces_.clear(); tileProvinces_.clear(); provinceState_.clear(); provinceEvents_.clear(); nations_.clear(); nationState_.clear(); people_.clear(); alive_.clear(); settlements_.clear(); settlementState_.clear(); settlementEvents_.clear(); guilds_.clear(); events_.clear(); interactions_.clear(); families_.clear(); marriages_.clear(); inheritances_.clear(); currentSpouses_.clear(); timeline_.clear(); nextSettlementName_=0;
-    createTerrain(); createRegions(); initialNations();
+    tiles_.clear(); owners_.clear(); continents_.clear(); regions_.clear(); provinces_.clear(); tileProvinces_.clear(); provinceState_.clear(); provinceEvents_.clear(); provinceNeighbors_.clear(); subfactions_.clear(); subfactionState_.clear(); subfactionPresences_.clear(); subfactionMemberships_.clear(); smugglingRoutes_.clear(); subfactionEvents_.clear(); nations_.clear(); nationState_.clear(); people_.clear(); alive_.clear(); settlements_.clear(); settlementState_.clear(); settlementEvents_.clear(); guilds_.clear(); events_.clear(); interactions_.clear(); families_.clear(); marriages_.clear(); inheritances_.clear(); currentSpouses_.clear(); timeline_.clear(); nextSettlementName_=0;
+    createTerrain(); createRegions(); initialNations(); seedSubfactions();
     for(const auto& module:modules_) module->onWorldCreated(*this);
     updateCensus(); capture(0);
     for(int year=1;year<=settings_.years;++year) {
