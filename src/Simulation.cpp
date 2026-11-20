@@ -11,12 +11,15 @@ int World::chooseFrontierTile(int nation, bool unclaimedOnly) {
     candidates.reserve(512);
     constexpr int dx[]{1,-1,0,0},dy[]{0,0,1,-1};
     const auto culture=nations_[static_cast<size_t>(nation)].culture;
-    for(int y=1;y<settings_.height-1;++y) for(int x=1;x<settings_.width-1;++x) {
+    for(int y=1;y<settings_.height-1;++y) for(int x=0;x<settings_.width;++x) {
         int idx=index(x,y);
         if(owners_[static_cast<size_t>(idx)]==nation || tiles_[static_cast<size_t>(idx)].terrain==Terrain::Sea) continue;
         if(unclaimedOnly && owners_[static_cast<size_t>(idx)]!=-1) continue;
         bool neighboring=false;
-        for(int dir=0;dir<4;++dir) if(owners_[static_cast<size_t>(index(x+dx[dir],y+dy[dir]))]==nation) {neighboring=true;break;}
+        for(int dir=0;dir<4;++dir) {
+            int ny=y+dy[dir];
+            if(ny>=0 && ny<settings_.height && owners_[static_cast<size_t>(index(wrapX(x+dx[dir]),ny))]==nation) {neighboring=true;break;}
+        }
         if(!neighboring) continue;
         candidates.push_back(idx);
         const auto t=tiles_[static_cast<size_t>(idx)].terrain;
@@ -55,12 +58,12 @@ void World::simulateTerritories(int year) {
             } else if(chance(.08)) {
                 addEvent(year,id,L"Переселенцы присоединили новые земли.");
             }
-            owners_[static_cast<size_t>(target)]=static_cast<int16_t>(id);
+            setProvinceOwner(provinceAt(target%settings_.width,target/settings_.width),id);
             int x=target%settings_.width,y=target/settings_.width;
             for(int dir=0;dir<4;++dir) {
-                int xx=x+dx[dir],yy=y+dy[dir];
-                if(inside(xx,yy) && owners_[static_cast<size_t>(index(xx,yy))]==-1 && chance(.045) && tiles_[static_cast<size_t>(index(xx,yy))].terrain!=Terrain::Sea)
-                    owners_[static_cast<size_t>(index(xx,yy))]=static_cast<int16_t>(id);
+                int xx=wrapX(x+dx[dir]),yy=y+dy[dir];
+                if(inside(xx,yy) && owners_[static_cast<size_t>(index(xx,yy))]==-1 && chance(.045) && provinceAt(xx,yy)>=0)
+                    setProvinceOwner(provinceAt(xx,yy),id);
             }
         }
     }
@@ -348,7 +351,7 @@ void World::simulateRebellion(int year) {
     for(int y=2;y<settings_.height-2;++y) for(int x=2;x<settings_.width-2;++x) {
         int idx=index(x,y);
         if(owners_[static_cast<size_t>(idx)]!=parent) continue;
-        if(std::abs(x-oldCapital.x)+std::abs(y-oldCapital.y)<7) continue;
+        if(std::min(std::abs(x-oldCapital.x),settings_.width-std::abs(x-oldCapital.x))+std::abs(y-oldCapital.y)<7) continue;
         bool settlementPresent=false;
         for(const auto& s:settlements_) if(s.position.x==x&&s.position.y==y) {settlementPresent=true;break;}
         if(!settlementPresent) candidates.push_back(idx);
@@ -360,9 +363,9 @@ void World::simulateRebellion(int year) {
     if(culture==Species::Human && chance(.16)) culture=Species::Outlaw;
     int rebel=createNation(culture,point,year);
     for(int dy=-2;dy<=2;++dy) for(int dx=-2;dx<=2;++dx) {
-        int x=point.x+dx,y=point.y+dy;
+        int x=wrapX(point.x+dx),y=point.y+dy;
         if(inside(x,y) && dx*dx+dy*dy<=5 && owners_[static_cast<size_t>(index(x,y))]==parent)
-            owners_[static_cast<size_t>(index(x,y))]=static_cast<int16_t>(rebel);
+            setProvinceOwner(provinceAt(x,y),rebel);
     }
     int defectors=0;
     for(int pid:alive_) {
