@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <queue>
+#include <set>
+#include <utility>
 #include <string>
 int main() {
     fantasy::World w;
@@ -63,6 +66,109 @@ int main() {
     assert(camera.zoom()==1.);
     auto fitted=camera.drawnRect();
     assert(fitted.width()<=1000 && fitted.height()<=600);
+    // A global planet: the 180-degree longitude seam is traversable in both directions.
+    assert(w.wrapX(-1)==settings.width-1);
+    assert(w.wrapX(settings.width)==0);
+    assert(std::abs(w.longitudeAt(0)+180.)<1e-10);
+    assert(std::abs(w.longitudeAt(settings.width)-180.)<1e-10);
+    assert(std::abs(w.latitudeAt(0)-90.)<1e-10);
+    assert(std::abs(w.latitudeAt(settings.height)+90.)<1e-10);
+    assert(w.planet().radiusKm>1000.);
+    assert(!w.continents().empty() && !w.regions().empty() && !w.provinces().empty());
+    assert(w.tileProvinces().size()==w.tiles().size());
+    size_t tilesInProvinces=0;
+    std::set<int> seenRegions;
+    for(const auto& province:w.provinces()) {
+        assert(province.id>=0 && static_cast<size_t>(province.id)<w.provinces().size());
+        assert(province.region>=0 && static_cast<size_t>(province.region)<w.regions().size());
+        assert(province.continent>=0 && static_cast<size_t>(province.continent)<w.continents().size());
+        assert(w.regions()[static_cast<size_t>(province.region)].continent==province.continent);
+        assert(!province.cells.empty() && province.landTiles==static_cast<int>(province.cells.size()));
+        assert(w.provinceAt(province.center.x,province.center.y)==province.id);
+        seenRegions.insert(province.region);
+        tilesInProvinces+=province.cells.size();
+        std::set<int> remaining(province.cells.begin(),province.cells.end());
+        std::queue<int> open;
+        open.push(*remaining.begin());remaining.erase(remaining.begin());
+        while(!open.empty()) {
+            int index=open.front();open.pop();
+            int x=index%settings.width,y=index/settings.width;
+            for(const auto [dx,dy]:{std::pair{1,0},std::pair{-1,0},std::pair{0,1},std::pair{0,-1}}) {
+                int yy=y+dy;
+                if(yy<0||yy>=settings.height)continue;
+                int at=w.index(w.wrapX(x+dx),yy);
+                if(remaining.erase(at))open.push(at);
+            }
+        }
+        assert(remaining.empty()); // Each province is geographically connected.
+    }
+    assert(seenRegions.size()==w.regions().size());
+    size_t land=0;
+    for(int y=0;y<settings.height;++y)for(int x=0;x<settings.width;++x) {
+        int pid=w.provinceAt(x,y);
+        if(w.tiles()[static_cast<size_t>(w.index(x,y))].terrain==fantasy::Terrain::Sea)
+            assert(pid==-1);
+        else {assert(pid>=0);++land;}
+    }
+    assert(land==tilesInProvinces);
+    for(const auto& region:w.regions()) {
+        assert(!region.provinces.empty());
+        int count=0;
+        for(int pid:region.provinces) {
+            assert(w.provinces()[static_cast<size_t>(pid)].region==region.id);
+            count+=w.provinces()[static_cast<size_t>(pid)].landTiles;
+        }
+        assert(region.landTiles==count);
+    }
+    // Region membership is topologically connected through adjacent provinces.
+    std::vector<std::set<int>> adjacency(w.provinces().size());
+    for(int y=0;y<settings.height;++y)for(int x=0;x<settings.width;++x) {
+        int pid=w.provinceAt(x,y);if(pid<0)continue;
+        for(const auto [dx,dy]:{std::pair{1,0},std::pair{0,1}}) {
+            int yy=y+dy;if(yy>=settings.height)continue;
+            int other=w.provinceAt(w.wrapX(x+dx),yy);
+            if(other>=0&&pid!=other) {adjacency[static_cast<size_t>(pid)].insert(other);
+                adjacency[static_cast<size_t>(other)].insert(pid);}
+        }
+    }
+    for(const auto& region:w.regions()) {
+        std::set<int> left(region.provinces.begin(),region.provinces.end());
+        std::queue<int> open;open.push(*left.begin());left.erase(left.begin());
+        while(!open.empty()) {
+            int id=open.front();open.pop();
+            for(int adjacent:adjacency[static_cast<size_t>(id)])if(left.erase(adjacent))open.push(adjacent);
+        }
+        assert(left.empty());
+    }
+    for(int year=0;year<=settings.years;++year) {
+        const auto& snap=w.at(year);
+        assert(snap.provinceStates.size()==w.provinces().size());
+        for(const auto& province:w.provinces()) {
+            int owner=snap.provinceStates[static_cast<size_t>(province.id)].owner;
+            assert(owner==w.provinceOwnerAt(snap,province.id));
+            for(int cell:province.cells)assert(snap.owner[static_cast<size_t>(cell)]==owner);
+            const auto& state=snap.provinceStates[static_cast<size_t>(province.id)];
+            assert(state.development>=0 && state.development<=100);
+            assert(state.unrest>=0 && state.unrest<=100);
+        }
+    }
+    for(const auto& event:w.provinceEvents()) {
+        assert(event.province>=0 && static_cast<size_t>(event.province)<w.provinces().size());
+        assert(event.year>=0 && event.year<=settings.years);
+        assert(w.at(event.year).provinceStates[static_cast<size_t>(event.province)].owner==event.newOwner);
+        if(event.year>0) assert(w.at(event.year-1).provinceStates[static_cast<size_t>(event.province)].owner==event.previousOwner);
+    }
+    // Pan across the date line: rendering and hit-testing must agree.
+    camera.reset(settings.width,settings.height);
+    camera.setViewport({0,0,1000,500});
+    camera.zoomAt(500,250,2.5);
+    auto seamA=camera.worldToScreen(0.5,settings.height*.5);
+    auto seamB=camera.worldToScreen(settings.width+0.5,settings.height*.5);
+    assert(std::abs(seamA.x-seamB.x)<1e-8);
+    camera.panPixels(-6000,0);
+    auto projection=camera.worldToScreen(-0.5,settings.height*.5);
+    auto reprojection=camera.worldToScreen(settings.width-0.5,settings.height*.5);
+    assert(std::abs(projection.x-reprojection.x)<1e-8);
     bool hadPirates=false;
     for(const auto& n:w.nations()) {
         if(n.founded==0 && n.culture==fantasy::Species::Outlaw) {
@@ -179,6 +285,14 @@ int main() {
     assert(w.inheritances().size()==again.inheritances().size());
     assert(w.settlementEvents().size()==again.settlementEvents().size());
     assert(w.at(80).settlementStates.size()==again.at(80).settlementStates.size());
+    assert(w.tileProvinces()==again.tileProvinces());
+    assert(w.regions().size()==again.regions().size());
+    assert(w.provinces().size()==again.provinces().size());
+    for(size_t i=0;i<w.provinces().size();++i) {
+        assert(w.provinces()[i].cells==again.provinces()[i].cells);
+        assert(w.provinces()[i].region==again.provinces()[i].region);
+    }
+    assert(w.provinceEvents().size()==again.provinceEvents().size());
     for(size_t i=0;i<w.at(80).settlementStates.size();++i) {
         assert(w.at(80).settlementStates[i].owner==again.at(80).settlementStates[i].owner);
         assert(w.at(80).settlementStates[i].prosperity==again.at(80).settlementStates[i].prosperity);
@@ -193,7 +307,7 @@ int main() {
     bool foundMagic=false;
     for(const auto& event:withModule.events()) if(event.text.find(L"Небесное знамение")!=std::wstring::npos) foundMagic=true;
     assert(foundMagic);
-    std::cout << "OK: " << w.nations().size() << " nations; " << w.people().size()
+    std::cout << "Planet: " << w.continents().size() << " landmasses; " << w.regions().size() << " regions; " << w.provinces().size() << " provinces. " << "OK: " << w.nations().size() << " nations; " << w.people().size()
               << " named persons; " << w.events().size() << " historical events; "
               << changed << " changed cells; "
               << w.settlements().size() << " settlements; "
