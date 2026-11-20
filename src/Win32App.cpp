@@ -26,7 +26,7 @@ using namespace fantasy;
 namespace {
 constexpr wchar_t MainClass[]=L"FantasyChronicleMainWindow";
 constexpr wchar_t DetailClass[]=L"FantasyChronicleDetailWindow";
-constexpr wchar_t PlacementKey[]=L"Software\FantasyChronicle";
+constexpr wchar_t PlacementKey[]=L"Software\\FantasyChronicle";
 constexpr wchar_t PlacementName[]=L"MainWindowPlacement";
 struct WindowGeometry {
     DWORD version{1};
@@ -90,7 +90,7 @@ constexpr COLORREF Muted=RGB(163,179,192);
 enum ControlID {
     ID_START=101, ID_COUNT=102, ID_YEARS=103, ID_SEED=104,
     ID_PREVIOUS=110, ID_NEXT=111, ID_PLAY=112, ID_SLIDER=113, ID_EXPORT=114, ID_NEW=115,
-    ID_PEOPLE=201, ID_DEAD=202
+    ID_PEOPLE=201, ID_DEAD=202, ID_LAYER=116
 };
 
 std::wstring number(int value) { return std::to_wstring(value); }
@@ -103,6 +103,9 @@ Rgb terrainColor(Terrain t) {
         case Terrain::Forest: return {81,135,94};
         case Terrain::Jungle: return {41,107,86};
         case Terrain::Mountain: return {135,137,141};
+        case Terrain::Desert: return {197,163,104};
+        case Terrain::Tundra: return {143,151,131};
+        case Terrain::Ice: return {224,237,239};
     }
     return {0,0,0};
 }
@@ -111,6 +114,11 @@ Rgb mix(const Rgb& a,const Rgb& b,int aPct) {
     return {static_cast<uint8_t>((int(a.r)*aPct+int(b.r)*bPct)/100),
             static_cast<uint8_t>((int(a.g)*aPct+int(b.g)*bPct)/100),
             static_cast<uint8_t>((int(a.b)*aPct+int(b.b)*bPct)/100)};
+}
+Rgb mapTint(int id) {
+    const uint32_t v=(static_cast<uint32_t>(id)+17u)*2654435761u;
+    return {static_cast<uint8_t>(70+(v&95)),static_cast<uint8_t>(75+((v>>8)&95)),
+            static_cast<uint8_t>(86+((v>>17)&95))};
 }
 uint32_t dibPixel(Rgb c) { return (uint32_t(c.r)<<16)|(uint32_t(c.g)<<8)|c.b; }
 std::wstring overview(Species type) {
@@ -158,18 +166,20 @@ private:
     HINSTANCE instance_{};
     HWND main_{}, details_{};
     HWND inputCount_{},inputYears_{},inputSeed_{},yearText_{},track_{},playButton_{};
-    HWND detailsTitle_{},detailsHistory_{},detailsPeople_{},detailsBio_{},detailsShowDead_{};
+    HWND detailsTitle_{},detailsHistory_{},detailsPeople_{},detailsBio_{},detailsShowDead_{},layerButton_{};
     HFONT font_{},fontSmall_{},fontTitle_{};
     HBRUSH backgroundBrush_{};
     std::vector<HWND> setupControls_,runtimeControls_;
     World world_;
     MapCamera camera_;
-    enum class DetailMode { Nation, Settlement };
+    enum class DetailMode { Nation, Settlement, Province, Region };
+    enum class MapLayer { Politics, Provinces, Regions };
+    MapLayer mapLayer_{MapLayer::Politics};
     DetailMode detailMode_{DetailMode::Nation};
     bool started_{false},playing_{false};
     bool mapPressed_{false},mapDragged_{false};
     int dragStartX_{},dragStartY_{},dragLastX_{},dragLastY_{};
-    int year_{0},selectedNation_{-1},selectedSettlement_{-1},selectedPerson_{-1};
+    int year_{0},selectedNation_{-1},selectedSettlement_{-1},selectedPerson_{-1},selectedProvince_{-1},selectedRegion_{-1};
     std::wstring hint_=L"Нажмите на цветную область карты, чтобы открыть её летопись.";
 
     static LRESULT CALLBACK mainProcedure(HWND,UINT,WPARAM,LPARAM);
@@ -195,6 +205,11 @@ private:
     void clickMap(int x,int y);
     void openDetails(int nation);
     void openSettlement(int settlement);
+    void openProvince(int province);
+    void openRegion(int region);
+    void cycleMapLayer();
+    void updateProvinceDetails();
+    void updateRegionDetails();
     void layoutDetails();
     void updateDetails();
     void updateSettlementDetails();
@@ -289,6 +304,8 @@ void Application::createRuntimeControls() {
     runtimeControls_.push_back(yearText_);
     runtimeControls_.push_back(createControl(main_,L"BUTTON",L"Летопись в TXT",BS_PUSHBUTTON,ID_EXPORT,1010,700,160,40));
     runtimeControls_.push_back(createControl(main_,L"BUTTON",L"Новый мир",BS_PUSHBUTTON,ID_NEW,1175,700,140,40));
+    layerButton_=createControl(main_,L"BUTTON",L"Слой: Государства",BS_PUSHBUTTON,ID_LAYER,800,22,280,32);
+    runtimeControls_.push_back(layerButton_);
     SendMessageW(track_,TBM_SETRANGEMIN,FALSE,0);
     SendMessageW(track_,TBM_SETRANGEMAX,TRUE,world_.settings().years);
     SendMessageW(track_,TBM_SETPOS,TRUE,0);
@@ -320,9 +337,10 @@ void Application::startGeneration() {
     }
     started_=true;year_=0;selectedNation_=-1;selectedSettlement_=-1;selectedPerson_=-1;
     camera_.reset(s.width,s.height);
+    mapLayer_=MapLayer::Politics;SetWindowTextW(layerButton_,L"Слой: Государства");
     camera_.setViewport({mapBounds().left,mapBounds().top,mapBounds().right,mapBounds().bottom});
     SetWindowTextW(yearText_,L"Год: 0");
-    hint_=L"Щелчок по точке — поселение, по области — государство.";
+    hint_=L"Переключайте слой: государства, провинции и регионы. Значок поселения открывает его летопись.";
     layoutMain();InvalidateRect(main_,nullptr,TRUE);
 }
 void Application::showSetup() {
@@ -357,6 +375,7 @@ void Application::layoutMain() {
         MoveWindow(yearText_,yearX,bottom+5,127,29,TRUE);
         MoveWindow(runtimeControls_[5],exportX,bottom,157,36,TRUE);
         MoveWindow(runtimeControls_[6],exportX+163,bottom,140,36,TRUE);
+        if(layerButton_) MoveWindow(layerButton_,std::max(520,static_cast<int>(rc.right)-306),23,286,33,TRUE);
     }
     if(!started_ && setupControls_.size()==7) {
         // Keep the start button visible on laptop displays with an 80%-height window.
@@ -419,112 +438,162 @@ void Application::paintSetup(HDC dc,const RECT& bounds) {
 void Application::paintWorld(HDC dc,const RECT& viewport) {
     const Snapshot& snap=world_.at(year_);
     const int w=world_.settings().width,h=world_.settings().height;
-    const MapRect rect=camera_.drawnRect();
-    RECT bounds{rect.left,rect.top,rect.right,rect.bottom};
-    int saved=SaveDC(dc);
+    const MapRect base=camera_.drawnRect();
+    const int saved=SaveDC(dc);
     IntersectClipRect(dc,viewport.left,viewport.top,viewport.right,viewport.bottom);
     std::vector<uint32_t> pixels(static_cast<size_t>(w*h));
     for(int y=0;y<h;++y) for(int x=0;x<w;++x) {
-        const int idx=world_.index(x,y);
-        auto base=terrainColor(world_.tiles()[static_cast<size_t>(idx)].terrain);
-        const int owner=snap.owner[static_cast<size_t>(idx)];
-        if(owner>=0) base=mix(world_.nations()[static_cast<size_t>(owner)].color,base,72);
-        else if(world_.tiles()[static_cast<size_t>(idx)].terrain==Terrain::Sea) {
+        int idx=world_.index(x,y);
+        auto baseColor=terrainColor(world_.tiles()[static_cast<size_t>(idx)].terrain);
+        int owner=snap.owner[static_cast<size_t>(idx)];
+        int province=world_.tileProvinces()[static_cast<size_t>(idx)];
+        if(province>=0) {
+            if(mapLayer_==MapLayer::Politics && owner>=0)
+                baseColor=mix(world_.nations()[static_cast<size_t>(owner)].color,baseColor,72);
+            else if(mapLayer_==MapLayer::Provinces)
+                baseColor=mix(mapTint(province),baseColor,68);
+            else if(mapLayer_==MapLayer::Regions)
+                baseColor=mix(mapTint(world_.provinces()[static_cast<size_t>(province)].region+120),baseColor,75);
+        } else {
             int shine=(x*5+y*11+world_.tiles()[static_cast<size_t>(idx)].height)%15;
-            base.b=static_cast<uint8_t>(std::min(220,int(base.b)+shine));
+            baseColor.b=static_cast<uint8_t>(std::min(220,int(baseColor.b)+shine));
         }
-        pixels[static_cast<size_t>(idx)]=dibPixel(base);
+        pixels[static_cast<size_t>(idx)]=dibPixel(baseColor);
     }
     BITMAPINFO info{};
     info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth=w;
-    info.bmiHeader.biHeight=-h;
-    info.bmiHeader.biPlanes=1;
-    info.bmiHeader.biBitCount=32;
+    info.bmiHeader.biWidth=w;info.bmiHeader.biHeight=-h;
+    info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
     info.bmiHeader.biCompression=BI_RGB;
     SetStretchBltMode(dc,COLORONCOLOR);
-    StretchDIBits(dc,bounds.left,bounds.top,bounds.right-bounds.left,bounds.bottom-bounds.top,
-                  0,0,w,h,pixels.data(),&info,DIB_RGB_COLORS,SRCCOPY);
-    HPEN pen=CreatePen(PS_SOLID,2,RGB(24,34,40));
-    HGDIOBJ oldPen=SelectObject(dc,pen);
-    const double sx=double(bounds.right-bounds.left)/w,sy=double(bounds.bottom-bounds.top)/h;
-    for(int y=0;y<h;++y) for(int x=0;x<w;++x) {
-        int idx=world_.index(x,y),owner=snap.owner[static_cast<size_t>(idx)];
-        if(x+1<w && owner!=snap.owner[static_cast<size_t>(idx+1)]) {
-            int xx=bounds.left+int(std::lround((x+1)*sx));
-            int y0=bounds.top+int(std::lround(y*sy));
-            int y1=bounds.top+int(std::lround((y+1)*sy));
-            MoveToEx(dc,xx,y0,nullptr);LineTo(dc,xx,y1);
+    // Three adjacent copies form a continuous planet around the 180-degree seam.
+    // At 100%-1200% zoom the viewport can intersect at most two of these copies.
+    for(int copy=-1;copy<=1;++copy) {
+        const int shift=copy*(base.right-base.left);
+        RECT rect{base.left+shift,base.top,base.right+shift,base.bottom};
+        if(rect.right<viewport.left || rect.left>viewport.right ||
+           rect.bottom<viewport.top || rect.top>viewport.bottom)continue;
+        const double sx=double(rect.right-rect.left)/w,sy=double(rect.bottom-rect.top)/h;
+        StretchDIBits(dc,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,
+                      0,0,w,h,pixels.data(),&info,DIB_RGB_COLORS,SRCCOPY);
+        // Province outlines are permanent; state borders change with the year.
+        auto drawBoundary=[&](int layer,COLORREF color,int width) {
+            HPEN pen=CreatePen(PS_SOLID,width,color);
+            HGDIOBJ original=SelectObject(dc,pen);
+            for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+                const int at=world_.index(x,y);
+                const int next=world_.index((x+1)%w,y);
+                const int down=y+1<h?world_.index(x,y+1):-1;
+                auto boundary=[&](int a,int b) {
+                    if(b<0)return false;
+                    int pa=world_.tileProvinces()[static_cast<size_t>(a)];
+                    int pb=world_.tileProvinces()[static_cast<size_t>(b)];
+                    if(pa<0||pb<0)return false;
+                    if(layer==0)return pa!=pb;
+                    if(layer==1)return world_.provinces()[static_cast<size_t>(pa)].region!=world_.provinces()[static_cast<size_t>(pb)].region;
+                    return snap.owner[static_cast<size_t>(a)]!=snap.owner[static_cast<size_t>(b)];
+                };
+                if(boundary(at,next)) {
+                    int xx=rect.left+int(std::lround((x+1)*sx));
+                    int y0=rect.top+int(std::lround(y*sy));
+                    int y1=rect.top+int(std::lround((y+1)*sy));
+                    MoveToEx(dc,xx,y0,nullptr);LineTo(dc,xx,y1);
+                }
+                if(boundary(at,down)) {
+                    int yy=rect.top+int(std::lround((y+1)*sy));
+                    int x0=rect.left+int(std::lround(x*sx));
+                    int x1=rect.left+int(std::lround((x+1)*sx));
+                    MoveToEx(dc,x0,yy,nullptr);LineTo(dc,x1,yy);
+                }
+            }
+            SelectObject(dc,original);DeleteObject(pen);
+        };
+        if(mapLayer_==MapLayer::Politics) {
+            drawBoundary(0,RGB(50,54,52),1);
+            drawBoundary(2,RGB(21,29,35),2);
+        } else if(mapLayer_==MapLayer::Provinces) {
+            drawBoundary(0,RGB(29,32,40),2);
+            drawBoundary(1,RGB(222,203,146),2);
+        } else {
+            drawBoundary(1,RGB(25,29,34),3);
         }
-        if(y+1<h && owner!=snap.owner[static_cast<size_t>(idx+w)]) {
-            int yy=bounds.top+int(std::lround((y+1)*sy));
-            int x0=bounds.left+int(std::lround(x*sx));
-            int x1=bounds.left+int(std::lround((x+1)*sx));
-            MoveToEx(dc,x0,yy,nullptr);LineTo(dc,x1,yy);
-        }
-    }
-    SelectObject(dc,oldPen);DeleteObject(pen);
-    // Markers remain anchored to the same map tiles while zooming or dragging.
-    HBRUSH white=CreateSolidBrush(RGB(245,233,193));
-    HBRUSH chosen=CreateSolidBrush(RGB(255,183,79));
-    HGDIOBJ oldBrush=SelectObject(dc,white);
-    SelectObject(dc,GetStockObject(BLACK_PEN));
-    for(const Settlement& place:world_.settlements()) {
-        if(place.founded>year_) continue;
-        int x=bounds.left+int(std::lround((place.position.x+.5)*sx));
-        int y=bounds.top+int(std::lround((place.position.y+.5)*sy));
-        if(x<viewport.left-14 || x>viewport.right+14 || y<viewport.top-14 || y>viewport.bottom+14) continue;
-        bool city=place.kind==SettlementKind::City||place.kind==SettlementKind::MountainCity;
-        int r=(city?6:4)+(camera_.zoom()>2.0?1:0);
-        SelectObject(dc,place.id==selectedSettlement_?chosen:white);
-        Ellipse(dc,x-r,y-r,x+r+1,y+r+1);
-    }
-    SelectObject(dc,oldBrush);DeleteObject(white);DeleteObject(chosen);
-    SelectObject(dc,fontSmall_);
-    SetBkMode(dc,TRANSPARENT);
-    for(const Nation& nation:world_.nations()) {
-        if(nation.founded>year_ || (nation.vanished>=0 && year_>=nation.vanished)) continue;
-        if(snap.owner[static_cast<size_t>(world_.index(nation.capital.x,nation.capital.y))]!=nation.id) continue;
-        int x=bounds.left+int(std::lround((nation.capital.x+.5)*sx))+8;
-        int y=bounds.top+int(std::lround((nation.capital.y+.5)*sy))-9;
-        std::wstring title=nation.name;
-        if(title.size()>19) title=title.substr(0,18)+L"…";
-        textLine(dc,x+1,y+1,title,RGB(9,16,22));
-        textLine(dc,x,y,title,RGB(255,247,219));
-    }
-    if(camera_.zoom()>=2.0) {
+        HBRUSH white=CreateSolidBrush(RGB(245,233,193));
+        HBRUSH chosen=CreateSolidBrush(RGB(255,183,79));
+        HGDIOBJ oldBrush=SelectObject(dc,white);
+        HGDIOBJ oldPen=SelectObject(dc,GetStockObject(BLACK_PEN));
         for(const Settlement& place:world_.settlements()) {
-            if(place.founded>year_) continue;
-            int x=bounds.left+int(std::lround((place.position.x+.5)*sx))+8;
-            int y=bounds.top+int(std::lround((place.position.y+.5)*sy))+6;
-            if(x<viewport.left || x>viewport.right-25 || y<viewport.top || y>viewport.bottom-16) continue;
-            std::wstring title=place.name;
-            if(title.size()>23) title=title.substr(0,22)+L"…";
-            textLine(dc,x+1,y+1,title,RGB(10,20,26));
-            textLine(dc,x,y,title,RGB(255,247,220));
+            if(place.founded>year_)continue;
+            int x=rect.left+int(std::lround((place.position.x+.5)*sx));
+            int y=rect.top+int(std::lround((place.position.y+.5)*sy));
+            if(x<viewport.left-14||x>viewport.right+14||y<viewport.top-14||y>viewport.bottom+14)continue;
+            bool city=place.kind==SettlementKind::City||place.kind==SettlementKind::MountainCity;
+            int radius=(city?6:4)+(camera_.zoom()>2.0?1:0);
+            SelectObject(dc,place.id==selectedSettlement_?chosen:white);
+            Ellipse(dc,x-radius,y-radius,x+radius+1,y+radius+1);
+        }
+        SelectObject(dc,oldPen);SelectObject(dc,oldBrush);
+        DeleteObject(white);DeleteObject(chosen);
+        SelectObject(dc,fontSmall_);SetBkMode(dc,TRANSPARENT);
+        if(mapLayer_==MapLayer::Politics) {
+            for(const Nation& nation:world_.nations()) {
+                if(nation.founded>year_ || (nation.vanished>=0&&year_>=nation.vanished))continue;
+                if(snap.owner[static_cast<size_t>(world_.index(nation.capital.x,nation.capital.y))]!=nation.id)continue;
+                int x=rect.left+int(std::lround((nation.capital.x+.5)*sx))+8;
+                int y=rect.top+int(std::lround((nation.capital.y+.5)*sy))-9;
+                std::wstring label=nation.name;
+                if(label.size()>19)label=label.substr(0,18)+L"…";
+                textLine(dc,x+1,y+1,label,RGB(9,16,22));textLine(dc,x,y,label,RGB(255,247,219));
+            }
+        } else if(mapLayer_==MapLayer::Regions) {
+            for(const Region& region:world_.regions()) {
+                int x=rect.left+int(std::lround((region.center.x+.5)*sx));
+                int y=rect.top+int(std::lround((region.center.y+.5)*sy));
+                if(x<viewport.left||x>viewport.right-40||y<viewport.top||y>viewport.bottom-15)continue;
+                textLine(dc,x+1,y+1,region.name,RGB(11,19,20));
+                textLine(dc,x,y,region.name,RGB(250,239,211));
+            }
+        } else if(camera_.zoom()>=1.65) {
+            for(const Province& province:world_.provinces()) {
+                int x=rect.left+int(std::lround((province.center.x+.5)*sx));
+                int y=rect.top+int(std::lround((province.center.y+.5)*sy));
+                if(x<viewport.left||x>viewport.right-20||y<viewport.top||y>viewport.bottom-15)continue;
+                textLine(dc,x+1,y+1,province.name,RGB(10,19,24));
+                textLine(dc,x,y,province.name,RGB(255,247,220));
+            }
+        }
+        if(camera_.zoom()>=2.0 && mapLayer_!=MapLayer::Provinces) {
+            for(const Settlement& place:world_.settlements()) {
+                if(place.founded>year_)continue;
+                int x=rect.left+int(std::lround((place.position.x+.5)*sx))+8;
+                int y=rect.top+int(std::lround((place.position.y+.5)*sy))+6;
+                if(x<viewport.left||x>viewport.right-25||y<viewport.top||y>viewport.bottom-16)continue;
+                std::wstring title=place.name;if(title.size()>23)title=title.substr(0,22)+L"…";
+                textLine(dc,x+1,y+1,title,RGB(10,20,26));textLine(dc,x,y,title,RGB(255,247,220));
+            }
         }
     }
     RestoreDC(dc,saved);
     HPEN frame=CreatePen(PS_SOLID,1,RGB(109,137,154));
-    HGDIOBJ oldFrame=SelectObject(dc,frame);
-    HGDIOBJ emptyBrush=SelectObject(dc,GetStockObject(NULL_BRUSH));
+    HGDIOBJ oldPen=SelectObject(dc,frame);
+    HGDIOBJ oldBrush=SelectObject(dc,GetStockObject(NULL_BRUSH));
     Rectangle(dc,viewport.left-1,viewport.top-1,viewport.right+1,viewport.bottom+1);
-    SelectObject(dc,emptyBrush);SelectObject(dc,oldFrame);DeleteObject(frame);
+    SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(frame);
 }
 void Application::paintLegend(HDC dc,const RECT& map) {
     RECT window{};GetClientRect(main_,&window);
     int left=window.right-305;
     SelectObject(dc,fontTitle_);
-    textLine(dc,24,28,L"МИР · " + number(year_) + L" ГОД");
+    textLine(dc,24,28,L"ПЛАНЕТА "+world_.planet().name+L" · " + number(year_) + L" ГОД");
     SelectObject(dc,fontSmall_);
-    textLine(dc,24,65,L"Колесо — масштаб · зажать ЛКМ — двигать · щелчок по точке — поселение",Muted);
+    textLine(dc,24,65,L"Колесо — масштаб · ЛКМ + движение — вращать карту · восток/запад соединены",Muted);
     textLine(dc,left,65,L"Масштаб: "+number(static_cast<int>(std::lround(camera_.zoom()*100)))+L"%",Muted);
     SelectObject(dc,font_);
-    textLine(dc,left,96,L"Государства");
+    textLine(dc,left,96,mapLayer_==MapLayer::Politics?L"Государства":
+        mapLayer_==MapLayer::Provinces?L"Провинции (границы постоянны)":L"Географические регионы");
     const Snapshot& snap=world_.at(year_);
     int count=0,visible=0;
     const int maxVisible=std::max(5,static_cast<int>(map.bottom-map.top-40)/35);
-    for(const Nation& n:world_.nations()) {
+    if(mapLayer_==MapLayer::Politics) for(const Nation& n:world_.nations()) {
         if(n.founded>year_ || n.id>=static_cast<int>(snap.nationStates.size()) || snap.nationStates[static_cast<size_t>(n.id)].territory<=0) continue;
         ++count;
         if(visible>=maxVisible) continue;
@@ -538,7 +607,15 @@ void Application::paintLegend(HDC dc,const RECT& map) {
         textLine(dc,left+21,y+16,L"Жителей: "+number(snap.nationStates[static_cast<size_t>(n.id)].population),RGB(118,142,159));
         ++visible;
     }
-    if(count>visible) textLine(dc,left,145+visible*35,L"И ещё "+number(count-visible)+L" государств…",Muted);
+    if(mapLayer_==MapLayer::Politics && count>visible) textLine(dc,left,145+visible*35,L"И ещё "+number(count-visible)+L" государств…",Muted);
+    if(mapLayer_!=MapLayer::Politics) {
+        SelectObject(dc,fontSmall_);
+        textLine(dc,left,139,L"Материков и островов: "+number(static_cast<int>(world_.continents().size())),Muted);
+        textLine(dc,left,164,L"Регионов: "+number(static_cast<int>(world_.regions().size())),Muted);
+        textLine(dc,left,189,L"Провинций: "+number(static_cast<int>(world_.provinces().size())),Muted);
+        textLine(dc,left,228,mapLayer_==MapLayer::Regions?L"ЛКМ — открыть регион":L"ЛКМ — открыть провинцию",Muted);
+        textLine(dc,left,251,L"Ctrl+ЛКМ — открыть государство",Muted);
+    }
     SelectObject(dc,fontSmall_);
     textLine(dc,24,window.bottom-119,hint_,Muted);
 }
@@ -568,11 +645,18 @@ void Application::clickMap(int x,int y) {
     }
     if(nearest>=0) { openSettlement(nearest);return; }
     auto worldPoint=camera_.screenToWorld(x,y);
-    const int tileX=static_cast<int>(std::floor(worldPoint.x));
+    const int tileX=world_.wrapX(static_cast<int>(std::floor(worldPoint.x)));
     const int tileY=static_cast<int>(std::floor(worldPoint.y));
     if(!world_.inside(tileX,tileY)) return;
     int idx=world_.index(tileX,tileY);
     int owner=snap.owner[static_cast<size_t>(idx)];
+    const int province=world_.provinceAt(tileX,tileY);
+    if(mapLayer_==MapLayer::Regions && province>=0 && !(GetKeyState(VK_CONTROL)&0x8000)) {
+        openRegion(world_.provinces()[static_cast<size_t>(province)].region);return;
+    }
+    if(mapLayer_==MapLayer::Provinces && province>=0 && !(GetKeyState(VK_CONTROL)&0x8000)) {
+        openProvince(province);return;
+    }
     if(owner>=0) openDetails(owner);
     else {
         hint_=world_.tiles()[static_cast<size_t>(idx)].terrain==Terrain::Sea?
@@ -607,20 +691,124 @@ void Application::openSettlement(int settlement) {
     ShowWindow(details_,SW_SHOW);SetForegroundWindow(details_);
     InvalidateRect(main_,nullptr,FALSE);
 }
+void Application::cycleMapLayer() {
+    int next=(static_cast<int>(mapLayer_)+1)%3;
+    mapLayer_=static_cast<MapLayer>(next);
+    const wchar_t* label=mapLayer_==MapLayer::Politics?L"Слой: Государства":
+        mapLayer_==MapLayer::Provinces?L"Слой: Провинции":L"Слой: Регионы";
+    if(layerButton_)SetWindowTextW(layerButton_,label);
+    InvalidateRect(main_,nullptr,FALSE);
+}
+void Application::openProvince(int id) {
+    if(id<0||static_cast<size_t>(id)>=world_.provinces().size())return;
+    detailMode_=DetailMode::Province;selectedProvince_=id;selectedPerson_=-1;
+    if(!details_) {
+        details_=CreateWindowExW(WS_EX_APPWINDOW,DetailClass,L"Летопись провинции",
+            WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,
+            CW_USEDEFAULT,CW_USEDEFAULT,1050,700,main_,nullptr,instance_,this);
+        if(!details_)return;
+    }
+    updateDetails();ShowWindow(details_,SW_SHOW);SetForegroundWindow(details_);
+    InvalidateRect(main_,nullptr,FALSE);
+}
+void Application::openRegion(int id) {
+    if(id<0||static_cast<size_t>(id)>=world_.regions().size())return;
+    detailMode_=DetailMode::Region;selectedRegion_=id;selectedPerson_=-1;
+    if(!details_) {
+        details_=CreateWindowExW(WS_EX_APPWINDOW,DetailClass,L"Регион планеты",
+            WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,
+            CW_USEDEFAULT,CW_USEDEFAULT,1050,700,main_,nullptr,instance_,this);
+        if(!details_)return;
+    }
+    updateDetails();ShowWindow(details_,SW_SHOW);SetForegroundWindow(details_);
+    InvalidateRect(main_,nullptr,FALSE);
+}
+void Application::updateProvinceDetails() {
+    if(!details_||selectedProvince_<0)return;
+    const auto& province=world_.provinces()[static_cast<size_t>(selectedProvince_)];
+    const auto& state=world_.at(year_).provinceStates[static_cast<size_t>(province.id)];
+    const auto& region=world_.regions()[static_cast<size_t>(province.region)];
+    const auto& continent=world_.continents()[static_cast<size_t>(province.continent)];
+    std::wstring title=province.name+L" — "+number(year_)+L" год";
+    SetWindowTextW(details_,title.c_str());SetWindowTextW(detailsTitle_,title.c_str());
+    std::wstring record=L"ПЛАНЕТА: "+world_.planet().name+L"\r\n";
+    record+=L"МАТЕРИК/ОСТРОВ: "+continent.name+L"\r\n";
+    record+=L"РЕГИОН: "+region.name+L"\r\n";
+    record+=L"ОСНОВНАЯ МЕСТНОСТЬ: "+std::wstring(terrainName(province.terrain))+L"\r\n";
+    record+=L"ПЛОЩАДЬ: "+number(province.landTiles)+L" клеток (не равна реальной площади в км²)\r\n";
+    record+=L"ЦЕНТР: "+number(static_cast<int>(std::lround(world_.longitudeAt(province.center.x+.5))))+L"° долготы, "+
+        number(static_cast<int>(std::lround(world_.latitudeAt(province.center.y+.5))))+L"° широты\r\n";
+    record+=L"ВЛАДЕЛЕЦ В "+number(year_)+L" ГОДУ: "+(state.owner>=0?
+        world_.nations()[static_cast<size_t>(state.owner)].name:std::wstring(L"Независима"))+L"\r\n";
+    record+=L"РАЗВИТИЕ: "+number(state.development)+L"/100; БЕСПОРЯДКИ: "+number(state.unrest)+L"/100\r\n";
+    record+=L"ПОСЕЛЕНИЙ: "+number(state.settlements)+L"\r\n\r\n";
+    for(const auto& town:world_.settlements())if(town.founded<=year_&&
+        world_.provinceAt(town.position.x,town.position.y)==province.id)
+        record+=L"• "+town.name+L" ("+settlementName(town.kind)+L")\r\n";
+    record+=L"\r\nИСТОРИЯ ПРОВИНЦИИ (новые сверху)\r\n";
+    int shown=0;
+    for(auto it=world_.provinceEvents().rbegin();it!=world_.provinceEvents().rend();++it)
+        if(it->province==province.id&&it->year<=year_) {
+            record+=L"["+number(it->year)+L"] "+it->text+L"\r\n";
+            if(++shown>=500)break;
+        }
+    if(!shown)record+=L"Пока нет записей.\r\n";
+    SendMessageW(detailsHistory_,EM_SETLIMITTEXT,1000000,0);
+    SetWindowTextW(detailsHistory_,record.c_str());
+    SendMessageW(detailsHistory_,EM_SETSEL,0,0);
+    SendMessageW(detailsHistory_,EM_SCROLLCARET,0,0);
+}
+void Application::updateRegionDetails() {
+    if(!details_||selectedRegion_<0)return;
+    const Region& region=world_.regions()[static_cast<size_t>(selectedRegion_)];
+    const auto& snap=world_.at(year_);
+    std::wstring title=region.name+L" — "+number(year_)+L" год";
+    SetWindowTextW(details_,title.c_str());SetWindowTextW(detailsTitle_,title.c_str());
+    std::wstring record=L"ПЛАНЕТА: "+world_.planet().name+L"\r\n";
+    record+=L"МАТЕРИК/ОСТРОВ: "+world_.continents()[static_cast<size_t>(region.continent)].name+L"\r\n";
+    record+=L"ПРОВИНЦИЙ: "+number(static_cast<int>(region.provinces.size()))+L"\r\n";
+    record+=L"ПЛОЩАДЬ: "+number(region.landTiles)+L" клеток\r\n";
+    record+=L"\r\nПРОВИНЦИИ И ВЛАДЕЛЬЦЫ В "+number(year_)+L" ГОДУ\r\n";
+    for(int id:region.provinces) {
+        const auto& p=world_.provinces()[static_cast<size_t>(id)];
+        const int owner=snap.provinceStates[static_cast<size_t>(id)].owner;
+        record+=L"• "+p.name+L" — "+(owner>=0?
+            world_.nations()[static_cast<size_t>(owner)].name:std::wstring(L"независима"))+L"\r\n";
+    }
+    record+=L"\r\nСОБЫТИЯ В РЕГИОНЕ (новые сверху)\r\n";
+    int count=0;
+    for(auto it=world_.provinceEvents().rbegin();it!=world_.provinceEvents().rend();++it)
+        if(it->year<=year_ && world_.provinces()[static_cast<size_t>(it->province)].region==region.id) {
+            record+=L"["+number(it->year)+L"] "+it->text+L"\r\n";
+            if(++count>=500)break;
+        }
+    if(!count)record+=L"Пока нет записей.\r\n";
+    SendMessageW(detailsHistory_,EM_SETLIMITTEXT,1000000,0);
+    SetWindowTextW(detailsHistory_,record.c_str());
+    SendMessageW(detailsHistory_,EM_SETSEL,0,0);
+    SendMessageW(detailsHistory_,EM_SCROLLCARET,0,0);
+}
 void Application::layoutDetails() {
     if(!details_) return;
     RECT rc{};GetClientRect(details_,&rc);
     int w=std::max(620,static_cast<int>(rc.right)),h=std::max(400,static_cast<int>(rc.bottom));
     int leftW=std::max(300,(w*57)/100),rightX=leftW+30,rightW=std::max(140,w-rightX-20);
     if(detailsTitle_) MoveWindow(detailsTitle_,18,15,w-30,47,TRUE);
-    if(detailsHistory_) MoveWindow(detailsHistory_,18,76,leftW-30,h-92,TRUE);
+    const bool geography=detailMode_==DetailMode::Province||detailMode_==DetailMode::Region;
+    if(detailsHistory_) MoveWindow(detailsHistory_,18,76,geography?w-38:leftW-30,h-92,TRUE);
+    if(detailsShowDead_) ShowWindow(detailsShowDead_,geography?SW_HIDE:SW_SHOW);
+    if(detailsPeople_) ShowWindow(detailsPeople_,geography?SW_HIDE:SW_SHOW);
+    if(detailsBio_) ShowWindow(detailsBio_,geography?SW_HIDE:SW_SHOW);
     if(detailsShowDead_) MoveWindow(detailsShowDead_,rightX,78,rightW,26,TRUE);
     int listH=std::max(145,(h-130)*43/100);
     if(detailsPeople_) MoveWindow(detailsPeople_,rightX,108,rightW,listH,TRUE);
     if(detailsBio_) MoveWindow(detailsBio_,rightX,115+listH,rightW,std::max(85,h-134-listH),TRUE);
 }
 void Application::updateDetails() {
-    if(detailMode_==DetailMode::Settlement) {updateSettlementDetails();return;}
+    if(detailMode_==DetailMode::Settlement) {layoutDetails();updateSettlementDetails();return;}
+    if(detailMode_==DetailMode::Province) {layoutDetails();updateProvinceDetails();return;}
+    if(detailMode_==DetailMode::Region) {layoutDetails();updateRegionDetails();return;}
+    layoutDetails();
     if(!details_ || selectedNation_<0 || !started_) return;
     const Nation& n=world_.nations()[static_cast<size_t>(selectedNation_)];
     const Snapshot& snap=world_.at(year_);
@@ -690,6 +878,13 @@ void Application::updateSettlementDetails() {
     record+=L"МЕСТНОСТЬ: "+std::wstring(terrainName(world_.tiles()[static_cast<size_t>(
                    world_.index(town.position.x,town.position.y))].terrain))+L"\r\n";
     record+=L"КООРДИНАТЫ: "+number(town.position.x)+L", "+number(town.position.y)+L"\r\n";
+    const int provinceId=world_.provinceAt(town.position.x,town.position.y);
+    if(provinceId>=0) {
+        const auto& p=world_.provinces()[static_cast<size_t>(provinceId)];
+        record+=L"ПРОВИНЦИЯ: "+p.name+L"\r\n";
+        record+=L"РЕГИОН: "+world_.regions()[static_cast<size_t>(p.region)].name+L"\r\n";
+        record+=L"МАТЕРИК/ОСТРОВ: "+world_.continents()[static_cast<size_t>(p.continent)].name+L"\r\n";
+    }
     record+=L"ОСНОВАНО: "+yearLabel(town.founded)+L"\r\n";
     if(town.foundingNation>=0)
         record+=L"ОСНОВАТЕЛЬ: "+world_.nations()[static_cast<size_t>(town.foundingNation)].name+L"\r\n";
@@ -843,7 +1038,20 @@ void Application::exportChronicle() {
     bool ok=true;
     auto output=[&](const std::wstring& s){ if(ok) ok=writeUtf8(file,s); };
     output(L"ЛЕТОПИСЬ ФЭНТЕЗИЙНОГО МИРА\r\nЗерно: "+number(static_cast<int>(world_.settings().seed))+L". Период: 0–"+number(world_.settings().years)+L" гг.\r\n\r\n");
-    output(L"=== ГОСУДАРСТВА ===\r\n");
+    output(L"Планета: "+world_.planet().name+L"; радиус: "+number(static_cast<int>(world_.planet().radiusKm))+
+           L" км; сферическая поверхность, широта ±90°, долгота ±180°.\r\n\r\n");
+    output(L"=== ГЕОГРАФИЧЕСКИЕ РЕГИОНЫ И ПРОВИНЦИИ ===\r\n");
+    for(const auto& r:world_.regions()) {
+        output(r.name+L" | "+world_.continents()[static_cast<size_t>(r.continent)].name+L" | провинций: "+
+               number(static_cast<int>(r.provinces.size()))+L"\r\n");
+    }
+    for(const auto& p:world_.provinces()) {
+        output(L"Провинция #"+number(p.id)+L": "+p.name+L" | "+
+               world_.regions()[static_cast<size_t>(p.region)].name+L" | "+terrainName(p.terrain)+L"\r\n");
+    }
+    output(L"\r\n=== ХРОНОЛОГИЯ ПЕРЕХОДОВ ПРОВИНЦИЙ ===\r\n");
+    for(const auto& event:world_.provinceEvents())output(L"["+number(event.year)+L"] "+event.text+L"\r\n");
+    output(L"\r\n=== ГОСУДАРСТВА ===\r\n");
     for(const auto& n:world_.nations()) {
         output(n.name+L" | "+speciesName(n.culture)+L" | основано: "+number(n.founded)+
                L" | конец: "+(n.vanished>=0?number(n.vanished):L"не наступил")+L"\r\n");
@@ -981,6 +1189,7 @@ LRESULT Application::dispatchMain(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
             case ID_PLAY: togglePlay();return 0;
             case ID_EXPORT: exportChronicle();return 0;
             case ID_NEW: showSetup();return 0;
+            case ID_LAYER: cycleMapLayer();return 0;
         }
         break;
     case WM_HSCROLL:
