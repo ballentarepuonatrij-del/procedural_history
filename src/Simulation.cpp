@@ -360,7 +360,7 @@ void World::simulateRebellion(int year) {
     int idx=candidates[static_cast<size_t>(randomInt(0,static_cast<int>(candidates.size())-1))];
     Point point{idx%settings_.width,idx/settings_.width};
     auto culture=nations_[static_cast<size_t>(parent)].culture;
-    if(culture==Species::Human && chance(.16)) culture=Species::Outlaw;
+    // Rebellions found sovereign states, never criminal gangs.
     int rebel=createNation(culture,point,year);
     for(int dy=-2;dy<=2;++dy) for(int dx=-2;dx<=2;++dx) {
         int x=wrapX(point.x+dx),y=point.y+dy;
@@ -434,6 +434,7 @@ void World::simulateYear(int year) {
     simulateInteractions(year);
     simulateRebellion(year);
     simulateSettlements(year);
+    simulateSubfactions(year);
     developCharacters(year);
     updateCensus();
     for(size_t n=0;n<nations_.size();++n) if(nations_[n].vanished<0 && nations_[n].founded<year && nationState_[n].territory==0) {
