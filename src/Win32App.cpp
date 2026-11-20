@@ -126,10 +126,39 @@ std::wstring overview(Species type) {
     case Species::Human: return L"Многорасовые города, деревни и замки. Античные традиции, торговля, экспансия; рабство считается допустимым.";
     case Species::Elf: return L"Изолированные лесные поселения, осторожная дипломатия, защита природы и отрицание рабства.";
     case Species::Dwarf: return L"Горные чертоги, шахты, кузни; изоляционизм сочетается с вооружёнными вылазками за пленниками.";
-    case Species::Outlaw: return L"Разрозненные шайки, пиратские стоянки, разбой и контрабандные картели; окрашенные области показывают зоны влияния.";
+    case Species::Outlaw: return L"Подфракции бандитов и пиратов действуют без собственной государственной территории.";
     case Species::Folk: return L"Маленькие скрытые общины лесных и сказочных существ; избегают встреч с крупными державами.";
     }
     return L"";
+}
+COLORREF factionColor(SubfactionKind type) {
+    switch(type) {
+    case SubfactionKind::Pirates: return RGB(244,193,81);
+    case SubfactionKind::Bandits: return RGB(224,103,97);
+    case SubfactionKind::HiddenFolk: return RGB(126,217,179);
+    }
+    return RGB(220,220,220);
+}
+struct FactionMarker { int faction{},province{},x{},y{}; };
+std::vector<FactionMarker> factionMarkers(const World& world,const MapCamera& camera,const Snapshot& snap) {
+    std::vector<FactionMarker> markers;
+    const MapRect base=camera.drawnRect();
+    const int w=world.settings().width,h=world.settings().height;
+    for(int copy=-1;copy<=1;++copy) {
+        const int left=base.left+copy*(base.right-base.left);
+        for(size_t i=0;i<snap.subfactionPresences.size();++i) {
+            const auto& presence=snap.subfactionPresences[i];
+            const auto& province=world.provinces()[static_cast<size_t>(presence.province)];
+            int overlap=0;
+            for(size_t k=0;k<i;++k)if(snap.subfactionPresences[k].province==presence.province)++overlap;
+            int x=left+int(std::lround((province.center.x+.5)*double(base.right-base.left)/w));
+            int y=base.top+int(std::lround((province.center.y+.5)*double(base.bottom-base.top)/h));
+            x+=(overlap%3-1)*14;
+            y+=(overlap/3)*14;
+            markers.push_back({presence.faction,presence.province,x,y});
+        }
+    }
+    return markers;
 }
 void textLine(HDC dc,int x,int y,const std::wstring& str,COLORREF color=Bright) {
     SetTextColor(dc,color);
@@ -179,14 +208,14 @@ private:
     std::vector<HWND> setupControls_,runtimeControls_;
     World world_;
     MapCamera camera_;
-    enum class DetailMode { Nation, Settlement, Province, Region };
-    enum class MapLayer { Politics, Provinces, Regions };
+    enum class DetailMode { Nation, Settlement, Province, Region, Subfaction };
+    enum class MapLayer { Politics, Provinces, Regions, Subfactions };
     MapLayer mapLayer_{MapLayer::Politics};
     DetailMode detailMode_{DetailMode::Nation};
     bool started_{false},playing_{false};
     bool mapPressed_{false},mapDragged_{false};
     int dragStartX_{},dragStartY_{},dragLastX_{},dragLastY_{};
-    int year_{0},selectedNation_{-1},selectedSettlement_{-1},selectedPerson_{-1},selectedProvince_{-1},selectedRegion_{-1};
+    int year_{0},selectedNation_{-1},selectedSettlement_{-1},selectedPerson_{-1},selectedProvince_{-1},selectedRegion_{-1},selectedSubfaction_{-1};
     std::wstring hint_=L"Нажмите на цветную область карты, чтобы открыть её летопись.";
 
     static LRESULT CALLBACK mainProcedure(HWND,UINT,WPARAM,LPARAM);
@@ -216,9 +245,11 @@ private:
     void openSettlement(int settlement);
     void openProvince(int province);
     void openRegion(int region);
+    void openSubfaction(int subfaction);
     void cycleMapLayer();
     void updateProvinceDetails();
     void updateRegionDetails();
+    void updateSubfactionDetails();
     void layoutDetails();
     void updateDetails();
     void updateSettlementDetails();
@@ -344,7 +375,7 @@ void Application::startGeneration() {
         SendMessageW(track_,TBM_SETRANGEMAX,TRUE,s.years);
         SendMessageW(track_,TBM_SETPOS,TRUE,0);
     }
-    started_=true;year_=0;selectedNation_=-1;selectedSettlement_=-1;selectedPerson_=-1;
+    started_=true;year_=0;selectedNation_=-1;selectedSettlement_=-1;selectedPerson_=-1;selectedSubfaction_=-1;
     camera_.reset(s.width,s.height);
     mapLayer_=MapLayer::Politics;SetWindowTextW(layerButton_,L"Слой: Государства");
     camera_.setViewport({mapBounds().left,mapBounds().top,mapBounds().right,mapBounds().bottom});
@@ -451,6 +482,16 @@ void Application::paintWorld(HDC dc,const RECT& viewport) {
     const int saved=SaveDC(dc);
     IntersectClipRect(dc,viewport.left,viewport.top,viewport.right,viewport.bottom);
     std::vector<uint32_t> pixels(static_cast<size_t>(w*h));
+    std::vector<Rgb> factionTints(world_.provinces().size(),Rgb{128,128,128});
+    std::vector<int> factionStrength(world_.provinces().size(),0);
+    if(mapLayer_==MapLayer::Subfactions)for(const auto& presence:snap.subfactionPresences) {
+        const auto kind=world_.subfactions()[static_cast<size_t>(presence.faction)].kind;
+        const Rgb tint=kind==SubfactionKind::Pirates?Rgb{244,193,81}:
+                       kind==SubfactionKind::Bandits?Rgb{224,103,97}:Rgb{126,217,179};
+        auto index=static_cast<size_t>(presence.province);
+        factionTints[index]=factionStrength[index]>0?mix(tint,factionTints[index],50):tint;
+        factionStrength[index]=std::min(50,factionStrength[index]+std::max(9,presence.influence/4));
+    }
     for(int y=0;y<h;++y) for(int x=0;x<w;++x) {
         int idx=world_.index(x,y);
         auto baseColor=terrainColor(world_.tiles()[static_cast<size_t>(idx)].terrain);
@@ -463,6 +504,13 @@ void Application::paintWorld(HDC dc,const RECT& viewport) {
                 baseColor=mix(mapTint(province),baseColor,68);
             else if(mapLayer_==MapLayer::Regions)
                 baseColor=mix(mapTint(world_.provinces()[static_cast<size_t>(province)].region+120),baseColor,75);
+            else if(mapLayer_==MapLayer::Subfactions) {
+                // Political ownership remains visible as a muted background.
+                if(owner>=0)baseColor=mix(world_.nations()[static_cast<size_t>(owner)].color,baseColor,30);
+                const size_t pi=static_cast<size_t>(province);
+                if(factionStrength[pi]>0)
+                    baseColor=mix(factionTints[pi],baseColor,factionStrength[pi]);
+            }
         } else {
             int shine=(x*5+y*11+world_.tiles()[static_cast<size_t>(idx)].height)%15;
             baseColor.b=static_cast<uint8_t>(std::min(220,int(baseColor.b)+shine));
@@ -523,8 +571,11 @@ void Application::paintWorld(HDC dc,const RECT& viewport) {
         } else if(mapLayer_==MapLayer::Provinces) {
             drawBoundary(0,RGB(29,32,40),2);
             drawBoundary(1,RGB(222,203,146),2);
-        } else {
+        } else if(mapLayer_==MapLayer::Regions) {
             drawBoundary(1,RGB(25,29,34),3);
+        } else {
+            drawBoundary(0,RGB(56,58,62),1);
+            drawBoundary(2,RGB(24,31,39),2);
         }
         HBRUSH white=CreateSolidBrush(RGB(245,233,193));
         HBRUSH chosen=CreateSolidBrush(RGB(255,183,79));
@@ -570,7 +621,28 @@ void Application::paintWorld(HDC dc,const RECT& viewport) {
                 textLine(dc,x,y,province.name,RGB(255,247,220));
             }
         }
-        if(camera_.zoom()>=2.0 && mapLayer_!=MapLayer::Provinces) {
+        if(mapLayer_==MapLayer::Subfactions) {
+            // Each active presence gets its own marker; overlapping factions never overwrite one another.
+            const auto markers=factionMarkers(world_,camera_,snap);
+            for(const auto& marker:markers) {
+                if(marker.x<rect.left || marker.x>=rect.right || marker.y<rect.top || marker.y>=rect.bottom)continue;
+                if(marker.x<viewport.left-10 || marker.x>viewport.right+10 ||
+                   marker.y<viewport.top-10 || marker.y>viewport.bottom+10)continue;
+                const auto kind=world_.subfactions()[static_cast<size_t>(marker.faction)].kind;
+                HPEN outline=CreatePen(PS_SOLID,2,marker.faction==selectedSubfaction_?RGB(255,255,255):RGB(24,31,40));
+                HBRUSH fill=CreateSolidBrush(factionColor(kind));
+                HGDIOBJ originalPen=SelectObject(dc,outline),originalBrush=SelectObject(dc,fill);
+                Ellipse(dc,marker.x-7,marker.y-7,marker.x+8,marker.y+8);
+                SelectObject(dc,originalBrush);SelectObject(dc,originalPen);
+                DeleteObject(fill);DeleteObject(outline);
+                if(camera_.zoom()>=2.0) {
+                    const auto& name=world_.subfactions()[static_cast<size_t>(marker.faction)].name;
+                    std::wstring label=name.size()>22?name.substr(0,21)+L"…":name;
+                    textLine(dc,marker.x+10,marker.y-8,label,RGB(253,245,218));
+                }
+            }
+        }
+        if(camera_.zoom()>=2.0 && mapLayer_!=MapLayer::Provinces && mapLayer_!=MapLayer::Subfactions) {
             for(const Settlement& place:world_.settlements()) {
                 if(place.founded>year_)continue;
                 int x=rect.left+int(std::lround((place.position.x+.5)*sx))+8;
@@ -598,7 +670,8 @@ void Application::paintLegend(HDC dc,const RECT& map) {
     textLine(dc,left,65,L"Масштаб: "+number(static_cast<int>(std::lround(camera_.zoom()*100)))+L"%",Muted);
     SelectObject(dc,font_);
     textLine(dc,left,96,mapLayer_==MapLayer::Politics?L"Государства":
-        mapLayer_==MapLayer::Provinces?L"Провинции (границы постоянны)":L"Географические регионы");
+        mapLayer_==MapLayer::Provinces?L"Провинции (границы постоянны)":
+        mapLayer_==MapLayer::Regions?L"Географические регионы":L"Подфракции (не государства)");
     const Snapshot& snap=world_.at(year_);
     int count=0,visible=0;
     const int maxVisible=std::max(5,static_cast<int>(map.bottom-map.top-40)/35);
@@ -617,13 +690,30 @@ void Application::paintLegend(HDC dc,const RECT& map) {
         ++visible;
     }
     if(mapLayer_==MapLayer::Politics && count>visible) textLine(dc,left,145+visible*35,L"И ещё "+number(count-visible)+L" государств…",Muted);
-    if(mapLayer_!=MapLayer::Politics) {
+    if(mapLayer_==MapLayer::Provinces || mapLayer_==MapLayer::Regions) {
         SelectObject(dc,fontSmall_);
         textLine(dc,left,139,L"Материков и островов: "+number(static_cast<int>(world_.continents().size())),Muted);
         textLine(dc,left,164,L"Регионов: "+number(static_cast<int>(world_.regions().size())),Muted);
         textLine(dc,left,189,L"Провинций: "+number(static_cast<int>(world_.provinces().size())),Muted);
         textLine(dc,left,228,mapLayer_==MapLayer::Regions?L"ЛКМ — открыть регион":L"ЛКМ — открыть провинцию",Muted);
         textLine(dc,left,251,L"Ctrl+ЛКМ — открыть государство",Muted);
+    }
+    if(mapLayer_==MapLayer::Subfactions) {
+        SelectObject(dc,fontSmall_);
+        int shown=0;
+        for(const auto& faction:world_.subfactions()) {
+            if(shown>=maxVisible)break;
+            int y=137+shown*35;
+            HBRUSH brush=CreateSolidBrush(factionColor(faction.kind));
+            RECT mark{left,y,left+13,y+14};FillRect(dc,&mark,brush);DeleteObject(brush);
+            std::wstring name=faction.name;
+            if(name.size()>28)name=name.substr(0,27)+L"…";
+            textLine(dc,left+20,y-2,name,faction.id==selectedSubfaction_?Bright:Muted);
+            textLine(dc,left+20,y+15,subfactionKindName(faction.kind),RGB(123,147,163));
+            ++shown;
+        }
+        textLine(dc,left,137+shown*35+8,L"Метки — базы и сети в провинциях",Muted);
+        textLine(dc,left,160+shown*35+8,L"Ctrl+ЛКМ — государство",Muted);
     }
     SelectObject(dc,fontSmall_);
     textLine(dc,24,window.bottom-119,hint_,Muted);
@@ -676,6 +766,14 @@ void Application::clickMap(int x,int y) {
     RECT viewport=mapBounds();
     if(x<viewport.left||x>=viewport.right||y<viewport.top||y>=viewport.bottom) return;
     const Snapshot& snap=world_.at(year_);
+    if(mapLayer_==MapLayer::Subfactions && !(GetKeyState(VK_CONTROL)&0x8000)) {
+        int selected=-1;double closest=100.0;
+        for(const auto& marker:factionMarkers(world_,camera_,snap)) {
+            double dx=x-marker.x,dy=y-marker.y,d=dx*dx+dy*dy;
+            if(d<closest) {closest=d;selected=marker.faction;}
+        }
+        if(selected>=0) {openSubfaction(selected);return;}
+    }
     // Settlement markers have precedence over the country's territory.
     // Pick the closest marker, using the exact drawing projection.
     int nearest=-1;
@@ -697,6 +795,12 @@ void Application::clickMap(int x,int y) {
     int idx=world_.index(tileX,tileY);
     int owner=snap.owner[static_cast<size_t>(idx)];
     const int province=world_.provinceAt(tileX,tileY);
+    if(mapLayer_==MapLayer::Subfactions && province>=0 && !(GetKeyState(VK_CONTROL)&0x8000)) {
+        const auto active=world_.subfactionsInProvince(snap,province);
+        if(!active.empty()) {openSubfaction(active.front());return;}
+        hint_=L"В этой провинции на выбранный год не обнаружено подфракций.";
+        InvalidateRect(main_,nullptr,FALSE);return;
+    }
     if(mapLayer_==MapLayer::Regions && province>=0 && !(GetKeyState(VK_CONTROL)&0x8000)) {
         openRegion(world_.provinces()[static_cast<size_t>(province)].region);return;
     }
@@ -738,10 +842,11 @@ void Application::openSettlement(int settlement) {
     InvalidateRect(main_,nullptr,FALSE);
 }
 void Application::cycleMapLayer() {
-    int next=(static_cast<int>(mapLayer_)+1)%3;
+    int next=(static_cast<int>(mapLayer_)+1)%4;
     mapLayer_=static_cast<MapLayer>(next);
     const wchar_t* label=mapLayer_==MapLayer::Politics?L"Слой: Государства":
-        mapLayer_==MapLayer::Provinces?L"Слой: Провинции":L"Слой: Регионы";
+        mapLayer_==MapLayer::Provinces?L"Слой: Провинции":
+        mapLayer_==MapLayer::Regions?L"Слой: Регионы":L"Слой: Подфракции";
     if(layerButton_)SetWindowTextW(layerButton_,label);
     InvalidateRect(main_,nullptr,FALSE);
 }
@@ -769,6 +874,67 @@ void Application::openRegion(int id) {
     updateDetails();ShowWindow(details_,SW_SHOW);SetForegroundWindow(details_);
     InvalidateRect(main_,nullptr,FALSE);
 }
+void Application::openSubfaction(int id) {
+    if(!started_ || id<0 || static_cast<size_t>(id)>=world_.subfactions().size())return;
+    detailMode_=DetailMode::Subfaction;selectedSubfaction_=id;selectedPerson_=-1;
+    if(!details_) {
+        details_=CreateWindowExW(WS_EX_APPWINDOW,DetailClass,L"Летопись подфракции",
+            WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,
+            CW_USEDEFAULT,CW_USEDEFAULT,1120,730,main_,nullptr,instance_,this);
+        if(!details_)return;
+    }
+    updateDetails();ShowWindow(details_,SW_SHOW);SetForegroundWindow(details_);
+    InvalidateRect(main_,nullptr,FALSE);
+}
+void Application::updateSubfactionDetails() {
+    if(!details_ || selectedSubfaction_<0)return;
+    const auto& faction=world_.subfactions()[static_cast<size_t>(selectedSubfaction_)];
+    const auto& snap=world_.at(year_);
+    const auto& state=snap.subfactionStates[static_cast<size_t>(faction.id)];
+    const std::wstring title=faction.name+L" — "+number(year_)+L" год";
+    SetWindowTextW(details_,title.c_str());SetWindowTextW(detailsTitle_,title.c_str());
+    std::wstring record=L"ТИП: "+std::wstring(subfactionKindName(faction.kind))+L"\r\n";
+    record+=L"СТАТУС: подфракция без суверенных территорий\r\n";
+    record+=L"ОСНОВАНА: "+yearLabel(faction.founded)+L"\r\n";
+    record+=L"ОСНОВНАЯ БАЗА: "+world_.provinces()[static_cast<size_t>(faction.homeProvince)].name+L"\r\n";
+    record+=L"РУКОВОДИТЕЛЬ: "+(state.leader>=0?world_.people()[static_cast<size_t>(state.leader)].name:std::wstring(L"неизвестен"))+L"\r\n";
+    int active=0;
+    for(const auto& person:world_.people()) if(world_.aliveAt(person,year_) &&
+        world_.subfactionOf(person.id,year_)==faction.id)++active;
+    record+=L"УЧАСТНИКОВ: "+number(active)+L" (поимённо)\r\n";
+    record+=L"КАЗНА: "+number(state.wealth)+L"; СИЛА: "+number(state.strength)+L"; СКРЫТНОСТЬ: "+number(state.secrecy)+L"\r\n";
+    record+=L"\r\nПРИСУТСТВИЕ В ПРОВИНЦИЯХ В "+number(year_)+L" ГОДУ\r\n";
+    for(const auto& p:snap.subfactionPresences)if(p.faction==faction.id) {
+        int owner=snap.provinceStates[static_cast<size_t>(p.province)].owner;
+        record+=L"• "+world_.provinces()[static_cast<size_t>(p.province)].name+L" — "+
+            (owner>=0?world_.nations()[static_cast<size_t>(owner)].name:std::wstring(L"нет государства"))+
+            L"; влияние "+number(p.influence)+L"/100\r\n";
+    }
+    if(faction.kind!=SubfactionKind::HiddenFolk) {
+        record+=L"\r\nКОНТРАБАНДНЫЕ МАРШРУТЫ (последние 12)\r\n";
+        int routes=0;
+        for(auto it=world_.smugglingRoutes().rbegin();it!=world_.smugglingRoutes().rend();++it)
+            if(it->faction==faction.id && it->year<=year_) {
+                record+=L"["+number(it->year)+L"] "+world_.provinces()[static_cast<size_t>(it->fromProvince)].name+
+                    L" → "+world_.provinces()[static_cast<size_t>(it->toProvince)].name+
+                    L"; прибыль "+number(it->profit)+L" монет\r\n";
+                if(++routes>=12)break;
+            }
+        if(!routes)record+=L"Пока не зарегистрированы.\r\n";
+    }
+    record+=L"\r\nЛЕТОПИСЬ ПОДФРАКЦИИ (новые сверху)\r\n";
+    int shown=0;
+    for(auto it=world_.subfactionEvents().rbegin();it!=world_.subfactionEvents().rend();++it)
+        if(it->faction==faction.id && it->year<=year_) {
+            record+=L"["+number(it->year)+L"] "+it->text+L"\r\n";
+            if(++shown>=450)break;
+        }
+    if(!shown)record+=L"Нет записей.\r\n";
+    SendMessageW(detailsHistory_,EM_SETLIMITTEXT,1000000,0);
+    SetWindowTextW(detailsHistory_,record.c_str());
+    SendMessageW(detailsHistory_,EM_SETSEL,0,0);SendMessageW(detailsHistory_,EM_SCROLLCARET,0,0);
+    populatePeopleList(false,faction.id);
+}
 void Application::updateProvinceDetails() {
     if(!details_||selectedProvince_<0)return;
     const auto& province=world_.provinces()[static_cast<size_t>(selectedProvince_)];
@@ -787,7 +953,14 @@ void Application::updateProvinceDetails() {
     record+=L"ВЛАДЕЛЕЦ В "+number(year_)+L" ГОДУ: "+(state.owner>=0?
         world_.nations()[static_cast<size_t>(state.owner)].name:std::wstring(L"Независима"))+L"\r\n";
     record+=L"РАЗВИТИЕ: "+number(state.development)+L"/100; БЕСПОРЯДКИ: "+number(state.unrest)+L"/100\r\n";
-    record+=L"ПОСЕЛЕНИЙ: "+number(state.settlements)+L"\r\n\r\n";
+    record+=L"ПОСЕЛЕНИЙ: "+number(state.settlements)+L"\r\n";
+    record+=L"\r\nПОДФРАКЦИИ (не владеют провинцией)\r\n";
+    const auto factions=world_.subfactionsInProvince(world_.at(year_),province.id);
+    for(int id:factions) {
+        record+=L"• "+world_.subfactions()[static_cast<size_t>(id)].name+L"\r\n";
+    }
+    if(factions.empty())record+=L"Нет известных баз и сетей.\r\n";
+    record+=L"\r\n";
     for(const auto& town:world_.settlements())if(town.founded<=year_&&
         world_.provinceAt(town.position.x,town.position.y)==province.id)
         record+=L"• "+town.name+L" ("+settlementName(town.kind)+L")\r\n";
@@ -854,6 +1027,7 @@ void Application::updateDetails() {
     if(detailMode_==DetailMode::Settlement) {layoutDetails();updateSettlementDetails();return;}
     if(detailMode_==DetailMode::Province) {layoutDetails();updateProvinceDetails();return;}
     if(detailMode_==DetailMode::Region) {layoutDetails();updateRegionDetails();return;}
+    if(detailMode_==DetailMode::Subfaction) {layoutDetails();updateSubfactionDetails();return;}
     layoutDetails();
     if(!details_ || selectedNation_<0 || !started_) return;
     const Nation& n=world_.nations()[static_cast<size_t>(selectedNation_)];
@@ -973,7 +1147,10 @@ void Application::populatePeopleList(bool settlementMode,int id) {
         if(p.born>year_) continue;
         bool alive=world_.aliveAt(p,year_);
         if(!includeDead && !alive) continue;
-        if(settlementMode) {
+        if(detailMode_==DetailMode::Subfaction) {
+            int relevantYear=alive?year_:std::max(p.born,p.died-1);
+            if(world_.subfactionOf(p.id,relevantYear)!=id)continue;
+        } else if(settlementMode) {
             if(p.homeSettlement!=id) continue;
         } else {
             int relevantYear=alive?year_:std::max(p.born,p.died-1);
@@ -1009,6 +1186,8 @@ void Application::updateBiography() {
     if(p.died<=year_) biography+=L"Смерть: "+yearLabel(p.died)+L"\r\n";
     biography+=L"Профессия: "+std::wstring(professionName(stage.profession))+L"\r\n";
     biography+=L"Положение: "+std::wstring(statusName(stage.status))+L"\r\n";
+    const int subfaction=world_.subfactionOf(p.id,relevantYear);
+    if(subfaction>=0) biography+=L"Подфракция: "+world_.subfactions()[static_cast<size_t>(subfaction)].name+L"\r\n";
     const auto& family=world_.families();
     const auto& everyone=world_.people();
     biography+=L"\r\nРОДОСЛОВНАЯ И СЕМЬЯ\r\n";
@@ -1097,6 +1276,21 @@ void Application::exportChronicle() {
     }
     output(L"\r\n=== ХРОНОЛОГИЯ ПЕРЕХОДОВ ПРОВИНЦИЙ ===\r\n");
     for(const auto& event:world_.provinceEvents())output(L"["+number(event.year)+L"] "+event.text+L"\r\n");
+    output(L"\r\n=== ПОДФРАКЦИИ (НЕ ВЛАДЕЮТ ЗЕМЛЁЙ) ===\r\n");
+    for(const auto& faction:world_.subfactions()) {
+        output(faction.name+L" | "+subfactionKindName(faction.kind)+L" | основная база: "+
+            world_.provinces()[static_cast<size_t>(faction.homeProvince)].name+L"\r\n");
+        const auto& latest=world_.at(world_.settings().years);
+        for(const auto& entry:latest.subfactionPresences)if(entry.faction==faction.id) {
+            const int owner=latest.provinceStates[static_cast<size_t>(entry.province)].owner;
+            output(L"    "+world_.provinces()[static_cast<size_t>(entry.province)].name+L"; влияние "+number(entry.influence)+
+                   L"; держава: "+(owner>=0?world_.nations()[static_cast<size_t>(owner)].name:std::wstring(L"нет"))+L"\r\n");
+        }
+    }
+    output(L"\r\n=== СОБЫТИЯ ПОДФРАКЦИЙ ===\r\n");
+    for(const auto& event:world_.subfactionEvents())
+        output(L"["+number(event.year)+L"] ["+world_.subfactions()[static_cast<size_t>(event.faction)].name+
+            L"] "+event.text+L"\r\n");
     output(L"\r\n=== ГОСУДАРСТВА ===\r\n");
     for(const auto& n:world_.nations()) {
         output(n.name+L" | "+speciesName(n.culture)+L" | основано: "+number(n.founded)+
