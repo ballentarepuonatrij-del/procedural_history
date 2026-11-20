@@ -169,14 +169,84 @@ int main() {
     auto projection=camera.worldToScreen(-0.5,settings.height*.5);
     auto reprojection=camera.worldToScreen(settings.width-0.5,settings.height*.5);
     assert(std::abs(projection.x-reprojection.x)<1e-8);
-    bool hadPirates=false;
+    // Crime and hidden-folk groups are NEVER political owners.
     for(const auto& n:w.nations()) {
-        if(n.founded==0 && n.culture==fantasy::Species::Outlaw) {
-            hadPirates=true;
-            assert(w.at(0).nationStates[static_cast<size_t>(n.id)].ruler>=0);
+        assert(n.culture==fantasy::Species::Human || n.culture==fantasy::Species::Elf ||
+               n.culture==fantasy::Species::Dwarf);
+    }
+    assert(w.subfactions().size()>=3);
+    bool pirates=false,bandits=false,hidden=false,multiNation=false,smuggling=false;
+    for(const auto& f:w.subfactions()) {
+        pirates|=f.kind==fantasy::SubfactionKind::Pirates;
+        bandits|=f.kind==fantasy::SubfactionKind::Bandits;
+        hidden|=f.kind==fantasy::SubfactionKind::HiddenFolk;
+        assert(f.homeProvince>=0 && static_cast<size_t>(f.homeProvince)<w.provinces().size());
+    }
+    assert(pirates && bandits && hidden);
+    for(int year=0;year<=settings.years;++year) {
+        const auto& snap=w.at(year);
+        assert(snap.subfactionStates.size()==w.subfactions().size());
+        std::set<std::pair<int,int>> present;
+        for(const auto& entry:snap.subfactionPresences) {
+            assert(entry.faction>=0 && static_cast<size_t>(entry.faction)<w.subfactions().size());
+            assert(entry.province>=0 && static_cast<size_t>(entry.province)<w.provinces().size());
+            assert(entry.influence>=1 && entry.influence<=100);
+            assert(present.insert({entry.faction,entry.province}).second);
+            auto ids=w.subfactionsInProvince(snap,entry.province);
+            assert(std::find(ids.begin(),ids.end(),entry.faction)!=ids.end());
+        }
+        for(const auto& f:w.subfactions()) {
+            std::set<int> countries;
+            for(const auto& entry:snap.subfactionPresences)if(entry.faction==f.id) {
+                int owner=snap.provinceStates[static_cast<size_t>(entry.province)].owner;
+                if(owner>=0)countries.insert(owner);
+            }
+            if(countries.size()>1)multiNation=true;
         }
     }
-    assert(hadPirates);
+    for(const auto& event:w.subfactionEvents()) {
+        assert(event.year>=0 && event.year<=settings.years);
+        assert(event.faction>=0 && static_cast<size_t>(event.faction)<w.subfactions().size());
+        assert(event.province>=0 && static_cast<size_t>(event.province)<w.provinces().size());
+        if(event.person>=0) {
+            assert(w.people()[static_cast<size_t>(event.person)].born<=event.year);
+            assert(w.subfactionOf(event.person,event.year)==event.faction);
+        }
+        if(event.action==fantasy::SubfactionAction::Smuggling) {
+            smuggling=true;
+            assert(w.subfactions()[static_cast<size_t>(event.faction)].kind!=fantasy::SubfactionKind::HiddenFolk);
+            assert(event.text.find(L"Контрабанда")!=std::wstring::npos);
+        }
+    }
+    assert(!w.smugglingRoutes().empty());
+    for(const auto& route:w.smugglingRoutes()) {
+        assert(route.year>=0 && route.year<=settings.years);
+        assert(route.fromProvince>=0 && route.toProvince>=0);
+        assert(route.fromProvince!=route.toProvince);
+        assert(route.fromNation>=0 && route.toNation>=0 && route.fromNation!=route.toNation);
+        assert(w.provinceOwnerAt(w.at(route.year),route.fromProvince)==route.fromNation);
+        assert(w.provinceOwnerAt(w.at(route.year),route.toProvince)==route.toNation);
+        assert(route.profit>0);
+        assert(route.actor>=0 && w.subfactionOf(route.actor,route.year)==route.faction);
+        if(route.contact>=0) assert(w.nationAt(w.people()[static_cast<size_t>(route.contact)],route.year)==route.toNation);
+        bool contiguous=false;
+        for(int cell:w.provinces()[static_cast<size_t>(route.fromProvince)].cells) {
+            int x=cell%settings.width,y=cell/settings.width;
+            for(auto [dx,dy]:{std::pair{1,0},std::pair{-1,0},std::pair{0,1},std::pair{0,-1}}) {
+                int yy=y+dy;
+                if(yy>=0 && yy<settings.height && w.provinceAt(w.wrapX(x+dx),yy)==route.toProvince)contiguous=true;
+            }
+            if(contiguous)break;
+        }
+        assert(contiguous);
+    }
+    for(const auto& m:w.subfactionMemberships()) {
+        assert(w.subfactionOf(m.person,m.year)==m.faction);
+        if(m.year>0 && w.people()[static_cast<size_t>(m.person)].born<m.year)
+            assert(w.subfactionOf(m.person,m.year-1)==-1);
+    }
+    assert(multiNation);
+    assert(smuggling);
     int changed=0;
     for(size_t i=0;i<w.at(0).owner.size();++i) if(w.at(0).owner[i]!=w.at(80).owner[i]) ++changed;
     assert(changed>10);
@@ -293,10 +363,35 @@ int main() {
         assert(w.provinces()[i].region==again.provinces()[i].region);
     }
     assert(w.provinceEvents().size()==again.provinceEvents().size());
+    assert(w.subfactions().size()==again.subfactions().size());
+    assert(w.subfactionEvents().size()==again.subfactionEvents().size());
+    assert(w.subfactionMemberships().size()==again.subfactionMemberships().size());
+    assert(w.smugglingRoutes().size()==again.smugglingRoutes().size());
+    for(size_t i=0;i<w.subfactionEvents().size();++i) {
+        const auto& a=w.subfactionEvents()[i],&b=again.subfactionEvents()[i];
+        assert(a.year==b.year && a.faction==b.faction && a.province==b.province && a.action==b.action);
+    }
+    for(int year=0;year<=settings.years;++year) {
+        const auto& a=w.at(year),&b=again.at(year);
+        assert(a.subfactionPresences.size()==b.subfactionPresences.size());
+        for(size_t i=0;i<a.subfactionPresences.size();++i)
+            assert(a.subfactionPresences[i].faction==b.subfactionPresences[i].faction &&
+                   a.subfactionPresences[i].province==b.subfactionPresences[i].province &&
+                   a.subfactionPresences[i].influence==b.subfactionPresences[i].influence);
+    }
     for(size_t i=0;i<w.at(80).settlementStates.size();++i) {
         assert(w.at(80).settlementStates[i].owner==again.at(80).settlementStates[i].owner);
         assert(w.at(80).settlementStates[i].prosperity==again.at(80).settlementStates[i].prosperity);
     }
+    // One sovereign nation still has independent criminal and hidden-folk groups.
+    fantasy::World small;
+    small.generate({1,12,7,40,30});
+    assert(small.nations().size()>=1);
+    assert(!small.subfactions().empty());
+    for(const auto& state:small.nations()) assert(state.culture!=fantasy::Species::Folk &&
+        state.culture!=fantasy::Species::Outlaw);
+    for(const auto& presence:small.at(12).subfactionPresences)
+        assert(presence.faction>=0 && presence.province>=0);
     fantasy::World withModule;
     withModule.registerModule(std::make_unique<MagicPortentsModule>());
     withModule.generate(settings);
@@ -307,6 +402,7 @@ int main() {
     bool foundMagic=false;
     for(const auto& event:withModule.events()) if(event.text.find(L"Небесное знамение")!=std::wstring::npos) foundMagic=true;
     assert(foundMagic);
+    std::cout << "Subfactions: " << w.subfactions().size() << "; cross-border=" << multiNation << "; smuggling=" << smuggling << ".\n";
     std::cout << "Planet: " << w.continents().size() << " landmasses; " << w.regions().size() << " regions; " << w.provinces().size() << " provinces. " << "OK: " << w.nations().size() << " nations; " << w.people().size()
               << " named persons; " << w.events().size() << " historical events; "
               << changed << " changed cells; "
