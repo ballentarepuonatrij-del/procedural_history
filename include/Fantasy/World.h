@@ -29,6 +29,31 @@ struct Region { int id{}, continent{}, landTiles{}; std::wstring name; Point cen
 struct Province { int id{}, continent{}, region{-1}, landTiles{}; std::wstring name; Point center{}; Terrain terrain{Terrain::Plain}; std::vector<int> cells; };
 struct ProvinceYear { int owner{-1}, settlements{}, development{40}, unrest{}; };
 struct ProvinceEvent { int year{}, province{}, previousOwner{-1}, newOwner{-1}; std::wstring text; };
+// Subfactions never own sovereign tiles. Several groups can coexist in one province.
+enum class SubfactionKind { Pirates, Bandits, HiddenFolk };
+enum class SubfactionAction { Founded, Recruitment, Smuggling, Raid, Trade, Clash, Refuge, Expansion, Crackdown };
+struct Subfaction {
+    int id{}, founded{}, homeProvince{-1};
+    SubfactionKind kind{SubfactionKind::Bandits};
+    std::wstring name;
+};
+struct SubfactionYear {
+    int leader{-1}, wealth{40}, strength{25}, secrecy{60};
+};
+struct SubfactionPresence { int faction{-1}, province{-1}, influence{20}; };
+struct SubfactionMembership { int year{}, person{-1}, faction{-1}; };
+// A structured cross-border trade record, independently verifiable in snapshots.
+struct SmugglingRoute {
+    int year{}, faction{-1}, fromProvince{-1}, toProvince{-1};
+    int fromNation{-1}, toNation{-1}, profit{}, actor{-1}, contact{-1};
+};
+struct SubfactionEvent {
+    int year{}, faction{-1}, province{-1}, person{-1}, otherFaction{-1}, nation{-1};
+    SubfactionAction action{SubfactionAction::Founded};
+    std::wstring text;
+};
+const wchar_t* subfactionKindName(SubfactionKind kind);
+
 struct Nation {
     int id{};
     std::wstring name;
@@ -55,6 +80,8 @@ struct Snapshot {
     std::vector<NationYear> nationStates;
     std::vector<SettlementYear> settlementStates;
     std::vector<ProvinceYear> provinceStates;
+    std::vector<SubfactionYear> subfactionStates;
+    std::vector<SubfactionPresence> subfactionPresences;
 };
 struct PersonStage {
     int year{}, nation{-1}, guild{-1};
@@ -164,6 +191,12 @@ public:
     const std::vector<Region>& regions() const { return regions_; }
     const std::vector<Province>& provinces() const { return provinces_; }
     const std::vector<ProvinceEvent>& provinceEvents() const { return provinceEvents_; }
+    const std::vector<Subfaction>& subfactions() const { return subfactions_; }
+    const std::vector<SubfactionEvent>& subfactionEvents() const { return subfactionEvents_; }
+    const std::vector<SubfactionMembership>& subfactionMemberships() const { return subfactionMemberships_; }
+    const std::vector<SmugglingRoute>& smugglingRoutes() const { return smugglingRoutes_; }
+    int subfactionOf(int personId,int year) const;
+    std::vector<int> subfactionsInProvince(const Snapshot& snapshot,int provinceId) const;
     const std::vector<int16_t>& tileProvinces() const { return tileProvinces_; }
     int provinceAt(int x,int y) const { return inside(x,y)?tileProvinces_[static_cast<size_t>(index(x,y))]:-1; }
     // One longitude period spans width tiles, from -180 to +180 degrees.
@@ -203,6 +236,13 @@ private:
     std::vector<int16_t> tileProvinces_;  // -1 for water
     std::vector<ProvinceYear> provinceState_;
     std::vector<ProvinceEvent> provinceEvents_;
+    std::vector<std::vector<int>> provinceNeighbors_;
+    std::vector<Subfaction> subfactions_;
+    std::vector<SubfactionYear> subfactionState_;
+    std::vector<SubfactionPresence> subfactionPresences_;
+    std::vector<SubfactionMembership> subfactionMemberships_;
+    std::vector<SmugglingRoute> smugglingRoutes_;
+    std::vector<SubfactionEvent> subfactionEvents_;
     std::mt19937 rng_{};
     std::vector<Tile> tiles_;
     std::vector<int16_t> owners_;
@@ -230,6 +270,12 @@ private:
     void createRegions();
     void setProvinceOwner(int province,int nation);
     void initialNations();
+    void seedSubfactions();
+    void simulateSubfactions(int year);
+    void joinSubfaction(int person,int faction,int year);
+    void recordSubfactionEvent(int year,int faction,int province,SubfactionAction action,
+                               const std::wstring& message,int person=-1,int otherFaction=-1);
+    bool adjacentProvinces(int first,int second) const;
     int createNation(Species species, Point capital, int year);
     Point chooseCapital(Species species);
     void startPeople(int nation, int number, int year, bool newborn);
