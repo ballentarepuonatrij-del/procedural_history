@@ -1,5 +1,6 @@
 #include "Fantasy/World.h"
 #include "Fantasy/MapCamera.h"
+#include "Fantasy/LabelLayout.h"
 #include "../examples/MagicPortentsModule.h"
 #include <cassert>
 #include <algorithm>
@@ -10,6 +11,35 @@
 #include <utility>
 #include <string>
 int main() {
+    // Pixel-space label decluttering: zoomed or crowded layouts may skip
+    // names, but displayed labels must never overlap each other or icons.
+    {
+        using fantasy::LabelLayout;
+        using fantasy::LabelRect;
+        LabelLayout layout({0,0,320,180},4);
+        layout.reserveSymbol({146,73,162,89});
+        auto first=layout.place(154,81,100,16);
+        assert(first);
+        assert(!fantasy::labelRectanglesOverlap(*first,{146,73,162,89},4));
+        auto second=layout.place(154,81,100,16);
+        assert(second);
+        assert(!fantasy::labelRectanglesOverlap(*first,*second,4));
+        LabelLayout crowded({0,0,95,30},3);
+        crowded.reserveSymbol({42,5,55,25});
+        assert(!crowded.place(50,15,90,18));
+        assert(!crowded.place(-100,15,50,10));
+        LabelLayout tiny({0,0,10,10});
+        assert(!tiny.place(5,5,10,10));
+        assert(!tiny.place(5,5,0,10));
+        LabelLayout dense({0,0,620,380},4);
+        for(int x=30;x<620;x+=27)
+            for(int y=30;y<380;y+=31)
+                dense.place(x,y,76,16);
+        const auto& occupied=dense.occupied();
+        for(size_t i=0;i<occupied.size();++i)
+            for(size_t j=i+1;j<occupied.size();++j)
+                assert(!fantasy::labelRectanglesOverlap(occupied[i],occupied[j],4));
+    }
     fantasy::World w;
     fantasy::Settings settings{10,80,123456,72,44};
     w.generate(settings);
