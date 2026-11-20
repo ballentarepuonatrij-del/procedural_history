@@ -5,7 +5,7 @@ const wchar_t* speciesName(Species x) {
     return L"Неизвестно";
 }
 const wchar_t* terrainName(Terrain x) {
-    switch(x) { case Terrain::Sea: return L"Море"; case Terrain::Plain: return L"Равнина"; case Terrain::Forest: return L"Лес"; case Terrain::Jungle: return L"Джунгли"; case Terrain::Mountain: return L"Горы"; }
+    switch(x) { case Terrain::Sea: return L"Море"; case Terrain::Plain: return L"Равнина"; case Terrain::Forest: return L"Лес"; case Terrain::Jungle: return L"Джунгли"; case Terrain::Mountain: return L"Горы"; case Terrain::Desert: return L"Пустыня"; case Terrain::Tundra: return L"Тундра"; case Terrain::Ice: return L"Ледяная пустошь"; }
     return L"?";
 }
 const wchar_t* governmentName(Government x) {
