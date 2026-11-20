@@ -1211,6 +1211,7 @@ LRESULT Application::dispatchMain(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
             if(mapDragged_) {
                 camera_.panPixels(x-dragLastX_,y-dragLastY_);
                 // Dragging changes only the map; avoid repainting controls and legend.
+                RECT viewport=mapBounds();
                 InvalidateRect(hwnd,&viewport,FALSE);
             }
             dragLastX_=x;dragLastY_=y;
