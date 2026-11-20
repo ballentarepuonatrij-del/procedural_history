@@ -9,6 +9,7 @@ add_library(FantasyCore STATIC
     src/WorldTypes.cpp
     src/Names.cpp
     src/Geography.cpp
+    src/Regions.cpp
     src/World.cpp
     src/CharacterDevelopment.cpp
     src/Family.cpp
